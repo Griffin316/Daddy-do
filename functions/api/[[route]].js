@@ -6,11 +6,22 @@ const OPEN_STATUSES = ['new', 'backlog', 'scheduled', 'in_progress', 'blocked'];
 const EDITABLE = [
   'title', 'description', 'assignee', 'priority', 'estimate_min', 'category',
   'location', 'status', 'blocked_reason', 'due_date', 'sprint_week', 'recur_days',
+  'scheduled_for', 'scheduled_time',
 ];
 const STATUS_LABEL = {
   new: 'New', backlog: 'Backlog', scheduled: 'Scheduled', in_progress: 'In progress',
-  blocked: 'Blocked', resolved: 'Resolved', closed: 'Closed',
+  blocked: 'Blocked', resolved: 'Done', closed: 'Closed',
 };
+
+// ---------- points rules ----------
+// Base points by size, multiplied by urgency. Bonuses for finishing on time and for her ✓.
+const SIZE_POINTS = { 15: 10, 30: 20, 60: 35, 180: 80, 480: 180 };
+const PRIORITY_MULT = { 1: 1.5, 2: 1.25, 3: 1, 4: 1 };
+const THANKS_POINTS = 10;
+function basePoints(t) {
+  const base = SIZE_POINTS[t.estimate_min] ?? (t.estimate_min ? Math.round(t.estimate_min * 0.4) + 5 : 15);
+  return Math.round(base * (PRIORITY_MULT[t.priority] || 1));
+}
 
 const json = (data, status = 200) =>
   new Response(JSON.stringify(data), { status, headers: { 'content-type': 'application/json' } });
@@ -25,6 +36,18 @@ function addDays(dateStr, days) {
   const d = dateStr ? new Date(dateStr + 'T00:00:00Z') : new Date();
   d.setUTCDate(d.getUTCDate() + days);
   return d.toISOString().slice(0, 10);
+}
+function mondayOf(dateStr) {
+  const d = new Date(dateStr + 'T00:00:00Z');
+  d.setUTCDate(d.getUTCDate() - ((d.getUTCDay() + 6) % 7));
+  return d.toISOString().slice(0, 10);
+}
+function prettyDate(dateStr, time) {
+  const d = new Date(dateStr + 'T00:00:00Z');
+  const s = d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'UTC' });
+  if (!time) return s;
+  const [h, m] = time.split(':').map(Number);
+  return `${s}, ${((h + 11) % 12) + 1}:${String(m).padStart(2, '0')}${h < 12 ? 'am' : 'pm'}`;
 }
 
 function clean(field, value) {
@@ -55,8 +78,13 @@ function clean(field, value) {
       return value;
     case 'due_date':
     case 'sprint_week':
+    case 'scheduled_for':
       if (value === null || value === '' || value === undefined) return null;
       if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) throw new Error(`${field} must be YYYY-MM-DD`);
+      return value;
+    case 'scheduled_time':
+      if (value === null || value === '' || value === undefined) return null;
+      if (!/^\d{2}:\d{2}$/.test(value)) throw new Error('scheduled_time must be HH:MM');
       return value;
     default:
       throw new Error('Unknown field ' + field);
@@ -72,15 +100,43 @@ async function getTicket(db, id) {
   return db.prepare('SELECT * FROM tickets WHERE id = ?').bind(id).first();
 }
 
-// ---------- handlers ----------
+async function getMembers(db) {
+  const s = await db.prepare("SELECT value FROM settings WHERE key = 'members'").first();
+  return JSON.parse(s?.value || '[]');
+}
+
+// Who should hear about something `actor` did on ticket `t`?
+// Fixer updates go to the requester; requester activity goes to the fixers.
+function recipientsFor(t, actor, members) {
+  const out = new Set();
+  if (t.requester && t.requester !== actor) out.add(t.requester);
+  if (actor === t.requester) {
+    for (const m of members) if (m.role === 'fixer' && m.name !== actor) out.add(m.name);
+    if (t.assignee && t.assignee !== actor) out.add(t.assignee);
+  }
+  return [...out];
+}
+
+async function notify(db, recipients, ticketId, actor, kind, body) {
+  if (!recipients.length) return;
+  await db.batch(recipients.map((r) => db.prepare(
+    'INSERT INTO notifications (recipient, ticket_id, actor, kind, body) VALUES (?, ?, ?, ?, ?)',
+  ).bind(r, ticketId, actor, kind, body.slice(0, 500))));
+}
+
+// ---------- tickets ----------
+
+const LIST_COLUMNS = `t.*,
+  (SELECT COUNT(*) FROM comments c WHERE c.ticket_id = t.id AND c.is_system = 0) AS comment_count,
+  (SELECT c.author || ': ' || c.body FROM comments c WHERE c.ticket_id = t.id AND c.is_system = 0
+     ORDER BY c.id DESC LIMIT 1) AS last_update,
+  (SELECT COALESCE(SUM(p.points), 0) FROM points p WHERE p.ticket_id = t.id AND p.points > 0) AS points_earned`;
 
 async function listTickets(db, url) {
   const includeClosed = url.searchParams.get('closed') === '1';
   const sql = includeClosed
-    ? `SELECT t.*, (SELECT COUNT(*) FROM comments c WHERE c.ticket_id = t.id AND c.is_system = 0) AS comment_count
-       FROM tickets t ORDER BY t.id DESC LIMIT 1000`
-    : `SELECT t.*, (SELECT COUNT(*) FROM comments c WHERE c.ticket_id = t.id AND c.is_system = 0) AS comment_count
-       FROM tickets t
+    ? `SELECT ${LIST_COLUMNS} FROM tickets t ORDER BY t.id DESC LIMIT 1000`
+    : `SELECT ${LIST_COLUMNS} FROM tickets t
        WHERE t.status != 'closed' OR t.closed_at >= datetime('now', '-30 days')
        ORDER BY t.id DESC`;
   const { results } = await db.prepare(sql).all();
@@ -100,13 +156,11 @@ async function createTicket(db, request, actor) {
     assignee: clean('assignee', body.assignee ?? ''),
     recur_days: clean('recur_days', body.recur_days ?? 0),
   };
+  const members = await getMembers(db);
   // Allow filing on behalf of another household member (e.g. Dad captures what Mom asked for).
   let requester = actor;
-  if (body.requester) {
-    const s = await db.prepare("SELECT value FROM settings WHERE key = 'members'").first();
-    const names = JSON.parse(s?.value || '[]').map((m) => m.name);
-    if (names.includes(String(body.requester))) requester = String(body.requester);
-  }
+  if (body.requester && members.some((m) => m.name === String(body.requester))) requester = String(body.requester);
+
   const row = await db.prepare(
     `INSERT INTO tickets (title, description, requester, priority, category, location, due_date,
                           estimate_min, assignee, recur_days)
@@ -114,13 +168,52 @@ async function createTicket(db, request, actor) {
   ).bind(t.title, t.description, requester, t.priority, t.category, t.location, t.due_date,
     t.estimate_min, t.assignee, t.recur_days).first();
   await audit(db, row.id, actor, requester === actor ? 'Opened ticket' : `Opened ticket on behalf of ${requester}`);
+  if (requester === actor) {
+    // Let the fixer(s) know a new request arrived.
+    const fixers = members.filter((m) => m.role === 'fixer' && m.name !== actor).map((m) => m.name);
+    await notify(db, fixers, row.id, actor, 'new', `New P${row.priority} request: ${row.title}`);
+  }
   return json({ ticket: row }, 201);
+}
+
+async function awardCompletion(db, t, actor, members) {
+  const already = await db.prepare(
+    "SELECT 1 FROM points WHERE ticket_id = ? AND kind = 'complete'",
+  ).bind(t.id).first();
+  if (already) return null;
+  const actorIsFixer = members.some((m) => m.name === actor && m.role === 'fixer');
+  const earner = actorIsFixer ? actor
+    : (t.assignee || members.find((m) => m.role === 'fixer')?.name || actor);
+  const base = basePoints(t);
+  const stmts = [db.prepare(
+    "INSERT INTO points (member, ticket_id, kind, points, note) VALUES (?, ?, 'complete', ?, ?)",
+  ).bind(earner, t.id, base, t.title)];
+  let bonus = 0;
+  const deadline = t.scheduled_for || t.due_date;
+  const today = new Date().toISOString().slice(0, 10);
+  if (deadline && today <= deadline) {
+    bonus = Math.max(5, Math.round(base * 0.25));
+    stmts.push(db.prepare(
+      "INSERT INTO points (member, ticket_id, kind, points, note) VALUES (?, ?, 'ontime', ?, ?)",
+    ).bind(earner, t.id, bonus, 'On-time bonus'));
+  }
+  await db.batch(stmts);
+  return { member: earner, points: base + bonus, base, bonus };
 }
 
 async function updateTicket(db, request, actor, id) {
   const before = await getTicket(db, id);
   if (!before) return bad('Not found', 404);
   const body = await request.json().catch(() => ({}));
+  const note = String(body.note || '').trim().slice(0, 2000);
+  const members = await getMembers(db);
+
+  // Scheduling a specific day also plans it into that week and marks it Scheduled.
+  if (body.scheduled_for) {
+    if (!('sprint_week' in body)) body.sprint_week = mondayOf(String(body.scheduled_for));
+    if (!('status' in body) && ['new', 'backlog'].includes(before.status)) body.status = 'scheduled';
+  }
+  if ('scheduled_for' in body && !body.scheduled_for) body.scheduled_time = null;
 
   const sets = [];
   const vals = [];
@@ -133,7 +226,7 @@ async function updateTicket(db, request, actor, id) {
     vals.push(v);
     changes[f] = v;
   }
-  if (!sets.length) return json({ ticket: before });
+  if (!sets.length && !note) return json({ ticket: before });
 
   if ('status' in changes) {
     if (changes.status === 'resolved') sets.push("resolved_at = datetime('now')");
@@ -157,16 +250,64 @@ async function updateTicket(db, request, actor, id) {
     if (changes.status === 'blocked' && after.blocked_reason) n += ` (${after.blocked_reason})`;
     notes.push(n);
   }
-  if ('priority' in changes) notes.push(`Priority P${before.priority} → P${changes.priority}`);
-  if ('sprint_week' in changes) {
+  if ('scheduled_for' in changes || 'scheduled_time' in changes) {
+    notes.push(after.scheduled_for ? `📅 Scheduled for ${prettyDate(after.scheduled_for, after.scheduled_time)}` : 'Unscheduled');
+  } else if ('sprint_week' in changes) {
     notes.push(changes.sprint_week ? `Planned for week of ${changes.sprint_week}` : 'Removed from weekly plan');
   }
+  if ('priority' in changes) notes.push(`Priority P${before.priority} → P${changes.priority}`);
   if ('estimate_min' in changes) notes.push(`Estimate set to ${changes.estimate_min} min`);
   if ('assignee' in changes) notes.push(changes.assignee ? `Assigned to ${changes.assignee}` : 'Unassigned');
   if ('due_date' in changes) notes.push(changes.due_date ? `Due ${changes.due_date}` : 'Due date cleared');
   if (notes.length) await audit(db, id, actor, notes.join(' · '));
+  if (note) {
+    await db.prepare('INSERT INTO comments (ticket_id, author, body) VALUES (?, ?, ?)').bind(id, actor, note).run();
+  }
 
-  // Recurring chores: closing spawns the next occurrence.
+  // ---- points ----
+  let award = null;
+  const nowDone = changes.status === 'resolved' || (changes.status === 'closed' && before.status !== 'new');
+  if (nowDone) award = await awardCompletion(db, after, actor, members);
+  if (changes.status === 'closed' && before.status === 'resolved' && actor === after.requester) {
+    const earned = await db.prepare(
+      "SELECT member FROM points WHERE ticket_id = ? AND kind = 'complete'",
+    ).bind(id).first();
+    const dup = await db.prepare("SELECT 1 FROM points WHERE ticket_id = ? AND kind = 'thanks'").bind(id).first();
+    if (earned && !dup && earned.member !== actor) {
+      await db.prepare(
+        "INSERT INTO points (member, ticket_id, kind, points, note) VALUES (?, ?, 'thanks', ?, ?)",
+      ).bind(earned.member, id, THANKS_POINTS, `${actor} approved ✓`).run();
+      await notify(db, [earned.member], id, actor, 'points',
+        `${actor} approved “${after.title}” ✓ +${THANKS_POINTS} pts`);
+    }
+  }
+  if ('status' in changes && OPEN_STATUSES.includes(changes.status) && ['resolved', 'closed'].includes(before.status)) {
+    // Reopened: take back the points; they'll be re-earned when it's really done.
+    await db.prepare("DELETE FROM points WHERE ticket_id = ? AND kind IN ('complete','ontime','thanks')").bind(id).run();
+  }
+
+  // ---- notifications ----
+  const recipients = recipientsFor(after, actor, members);
+  let kind = note ? 'update' : 'status';
+  let msg = notes.join(' · ');
+  if (changes.status === 'resolved') {
+    kind = 'resolved';
+    msg = `✅ Done: “${after.title}” — please check it`;
+  } else if ('scheduled_for' in changes && after.scheduled_for) {
+    kind = 'scheduled';
+    msg = `📅 “${after.title}” scheduled for ${prettyDate(after.scheduled_for, after.scheduled_time)}`;
+  } else if (msg) {
+    msg = `“${after.title}”: ${msg}`;
+  } else {
+    msg = `Update on “${after.title}”`;
+  }
+  if (note) msg += ` — ${note}`;
+  // Points/priority-only tweaks are noise; only notify on meaningful changes.
+  const approvedOnly = changes.status === 'closed' && before.status === 'resolved' && !note; // "+10 pts" notice covers it
+  const meaningful = !approvedOnly && (note || ['status', 'scheduled_for', 'scheduled_time', 'due_date', 'sprint_week'].some((f) => f in changes));
+  if (meaningful) await notify(db, recipients, id, actor, kind, msg);
+
+  // ---- recurring chores: closing spawns the next occurrence ----
   let spawned = null;
   if (changes.status === 'closed' && after.recur_days > 0) {
     spawned = await db.prepare(
@@ -180,7 +321,7 @@ async function updateTicket(db, request, actor, id) {
     await audit(db, id, actor, `Next occurrence created: #${spawned.id}`);
   }
 
-  return json({ ticket: after, spawned });
+  return json({ ticket: after, spawned, award });
 }
 
 async function ticketDetail(db, id) {
@@ -188,7 +329,8 @@ async function ticketDetail(db, id) {
   if (!ticket) return bad('Not found', 404);
   const { results } = await db.prepare('SELECT * FROM comments WHERE ticket_id = ? ORDER BY id ASC')
     .bind(id).all();
-  return json({ ticket, comments: results });
+  const pts = await db.prepare('SELECT * FROM points WHERE ticket_id = ? ORDER BY id').bind(id).all();
+  return json({ ticket, comments: results, points: pts.results });
 }
 
 async function addComment(db, request, actor, id) {
@@ -201,16 +343,110 @@ async function addComment(db, request, actor, id) {
     'INSERT INTO comments (ticket_id, author, body) VALUES (?, ?, ?) RETURNING *',
   ).bind(id, actor, text).first();
   await db.prepare("UPDATE tickets SET updated_at = datetime('now') WHERE id = ?").bind(id).run();
+  const members = await getMembers(db);
+  await notify(db, recipientsFor(ticket, actor, members), id, actor, 'comment', `💬 “${ticket.title}”: ${text}`);
   return json({ comment: row }, 201);
 }
 
 async function deleteTicket(db, id) {
   await db.batch([
     db.prepare('DELETE FROM comments WHERE ticket_id = ?').bind(id),
+    db.prepare('DELETE FROM notifications WHERE ticket_id = ?').bind(id),
     db.prepare('DELETE FROM tickets WHERE id = ?').bind(id),
   ]);
   return json({ ok: true });
 }
+
+// ---------- notifications ----------
+
+async function listNotifications(db, actor) {
+  const { results } = await db.prepare(
+    'SELECT * FROM notifications WHERE recipient = ? ORDER BY id DESC LIMIT 60',
+  ).bind(actor).all();
+  const unread = await db.prepare(
+    'SELECT COUNT(*) AS n FROM notifications WHERE recipient = ? AND read_at IS NULL',
+  ).bind(actor).first();
+  return json({ notifications: results, unread: unread.n });
+}
+
+async function markRead(db, request, actor) {
+  const body = await request.json().catch(() => ({}));
+  if (Array.isArray(body.ids) && body.ids.length) {
+    const ids = body.ids.map(Number).filter(Number.isInteger).slice(0, 200);
+    await db.prepare(
+      `UPDATE notifications SET read_at = datetime('now')
+       WHERE recipient = ? AND read_at IS NULL AND id IN (${ids.map(() => '?').join(',')})`,
+    ).bind(actor, ...ids).run();
+  } else if (body.ticket_id) {
+    await db.prepare(
+      "UPDATE notifications SET read_at = datetime('now') WHERE recipient = ? AND read_at IS NULL AND ticket_id = ?",
+    ).bind(actor, Number(body.ticket_id)).run();
+  } else {
+    await db.prepare(
+      "UPDATE notifications SET read_at = datetime('now') WHERE recipient = ? AND read_at IS NULL",
+    ).bind(actor).run();
+  }
+  return listNotifications(db, actor);
+}
+
+// ---------- points & rewards ----------
+
+async function pointsSummary(db) {
+  const members = await getMembers(db);
+  const totals = await db.prepare(`
+    SELECT member,
+      SUM(points) AS balance,
+      SUM(CASE WHEN points > 0 THEN points ELSE 0 END) AS lifetime,
+      SUM(CASE WHEN points > 0 AND created_at >= datetime('now','-7 days') THEN points ELSE 0 END) AS last7,
+      SUM(CASE WHEN points > 0 AND created_at >= datetime('now','-30 days') THEN points ELSE 0 END) AS last30,
+      SUM(CASE WHEN kind = 'complete' THEN 1 ELSE 0 END) AS jobs,
+      SUM(CASE WHEN kind = 'ontime' THEN 1 ELSE 0 END) AS ontime,
+      SUM(CASE WHEN kind = 'thanks' THEN 1 ELSE 0 END) AS thanks
+    FROM points GROUP BY member`).all();
+  const weekly = await db.prepare(`
+    SELECT member, date(created_at, 'weekday 0', '-6 days') AS week, SUM(points) AS pts
+    FROM points WHERE points > 0 AND created_at >= datetime('now', '-120 days')
+    GROUP BY member, week ORDER BY week DESC`).all();
+  const history = await db.prepare(`
+    SELECT p.*, t.title FROM points p LEFT JOIN tickets t ON t.id = p.ticket_id
+    ORDER BY p.id DESC LIMIT 40`).all();
+  const rewards = await db.prepare('SELECT * FROM rewards WHERE active = 1 ORDER BY cost').all();
+  return json({
+    members,
+    totals: totals.results,
+    weekly: weekly.results,
+    history: history.results,
+    rewards: rewards.results,
+  });
+}
+
+async function createReward(db, request) {
+  const body = await request.json().catch(() => ({}));
+  const title = String(body.title || '').trim().slice(0, 100);
+  const cost = Math.round(Number(body.cost) || 0);
+  const emoji = String(body.emoji || '🎁').slice(0, 8);
+  if (!title) return bad('Reward needs a name');
+  if (cost <= 0 || cost > 100000) return bad('Cost must be a positive number of points');
+  const row = await db.prepare('INSERT INTO rewards (title, cost, emoji) VALUES (?, ?, ?) RETURNING *')
+    .bind(title, cost, emoji).first();
+  return json({ reward: row }, 201);
+}
+
+async function redeemReward(db, actor, id) {
+  const reward = await db.prepare('SELECT * FROM rewards WHERE id = ? AND active = 1').bind(id).first();
+  if (!reward) return bad('Reward not found', 404);
+  const bal = await db.prepare('SELECT COALESCE(SUM(points),0) AS b FROM points WHERE member = ?').bind(actor).first();
+  if (bal.b < reward.cost) return bad(`Not enough points — you have ${bal.b}, need ${reward.cost}`);
+  await db.prepare(
+    "INSERT INTO points (member, kind, points, note) VALUES (?, 'redeem', ?, ?)",
+  ).bind(actor, -reward.cost, `${reward.emoji} ${reward.title}`).run();
+  const members = await getMembers(db);
+  await notify(db, members.filter((m) => m.name !== actor).map((m) => m.name), null, actor, 'reward',
+    `🎉 ${actor} cashed in ${reward.cost} pts for: ${reward.emoji} ${reward.title}`);
+  return json({ ok: true, balance: bal.b - reward.cost });
+}
+
+// ---------- settings & stats ----------
 
 async function getSettings(db) {
   const { results } = await db.prepare('SELECT key, value FROM settings').all();
@@ -267,8 +503,8 @@ export async function onRequest({ request, env, params }) {
 
   try {
     const [res, id, sub] = parts;
-    const numId = id !== undefined ? Number(id) : null;
-    if (id !== undefined && !Number.isInteger(numId)) return bad('Bad id');
+    const numId = id !== undefined && id !== 'read' ? Number(id) : null;
+    if (numId !== null && !Number.isInteger(numId)) return bad('Bad id');
 
     if (res === 'tickets') {
       if (id === undefined && method === 'GET') return await listTickets(db, url);
@@ -277,6 +513,19 @@ export async function onRequest({ request, env, params }) {
       if (sub === undefined && method === 'PATCH') return await updateTicket(db, request, actor, numId);
       if (sub === undefined && method === 'DELETE') return await deleteTicket(db, numId);
       if (sub === 'comments' && method === 'POST') return await addComment(db, request, actor, numId);
+    }
+    if (res === 'notifications') {
+      if (id === undefined && method === 'GET') return await listNotifications(db, actor);
+      if (id === 'read' && method === 'POST') return await markRead(db, request, actor);
+    }
+    if (res === 'points' && method === 'GET') return await pointsSummary(db);
+    if (res === 'rewards') {
+      if (id === undefined && method === 'POST') return await createReward(db, request);
+      if (sub === undefined && method === 'DELETE') {
+        await db.prepare('UPDATE rewards SET active = 0 WHERE id = ?').bind(numId).run();
+        return json({ ok: true });
+      }
+      if (sub === 'redeem' && method === 'POST') return await redeemReward(db, actor, numId);
     }
     if (res === 'settings' && method === 'GET') return await getSettings(db);
     if (res === 'settings' && method === 'PUT') return await putSettings(db, request);

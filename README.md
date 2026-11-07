@@ -19,6 +19,9 @@ You get asked to do 100 things, usually in passing, while you're doing something
 | Was it actually fixed? | Resolve → requester confirms → close | You mark it **Done**. She taps **Looks good ✓** or **Not quite**. |
 | Recurring chores (filters, gutters…) | Recurring tickets | Closing a recurring ticket automatically creates the next one |
 | Old requests rot at the bottom | Aging | Backlog sorts by priority, then due date, then age, so old P3s rise over time |
+| "When are you doing it?" | Change scheduling | Dad picks a day and time ("Sat 10am") on each ticket. She sees **📅 Scheduled · Sat 10am** on her request, and the week view is grouped by day. |
+| "Any update?" | Status updates + notifications | **📝 Post update**: set the status, schedule and a message in one step. She gets an **in-app notification** (🔔 with an unread count), plus a phone buzz on Android if she turns it on. |
+| Motivation | Gamification | **⭐ Points & 🏆 rewards**: Dad earns points for each finished job, with bonuses for finishing on time and when she approves. He levels up and redeems rewards she sets ("Sleep in Saturday – 150 pts"). |
 | "You never do anything" | Reporting | Dashboard: done in 7/30 days, hours of chores done, average time to done |
 
 ### The workflow
@@ -29,6 +32,25 @@ She files ─► New ─► (you triage: size + priority) ─► Backlog ─► 
 ```
 
 **Weekly ritual (10 min, Sunday night):** open *This week*, hit **⚡ Auto-fill from backlog** (it fills by priority until your capacity runs out), and show her the plan. If something she wants isn't on it, the capacity bar makes the trade-off obvious: *"Sure, which one bumps to next week?"*
+
+## ⭐ Points & rewards
+
+| | Points |
+|---|---|
+| Finish a 15m / 30m / 1h / 3h / day job | 10 / 20 / 35 / 80 / 180 |
+| Urgency multiplier | P1 ×1.5 · P2 ×1.25 |
+| Done on/before the scheduled day or due date | +25% |
+| She taps **Looks good ✓** | +10 |
+| Ticket reopened ("Not quite") | points removed until it's really done |
+
+The 🏆 tab shows Dad's balance, his level (Apprentice → Handy → Fix-it Pro → Master of the House → Household Legend → Mythical), a weekly streak 🔥, and his history. She manages the reward shop. When he redeems a reward, she gets a notification 🎉.
+
+## 🔔 Updates & notifications
+
+- **Dad** taps **📝 Update** on any ticket. In one step he picks a status (Scheduled / Working on it / Blocked / Done), a day and time (Today / Tomorrow / Sat / Sun / pick a date), and a message to her.
+- **She** sees the status, the 📅 scheduled day and time, and his latest message right on each request. A new event bumps the 🔔 count and shows a toast. Opening the ticket marks it read.
+- **She gets notified when** he schedules, reschedules, starts, blocks, finishes or comments, and when he redeems a reward. **He gets notified when** she files a request, comments, approves (+10 pts) or reopens.
+- **Android (Pixel):** open the site in Chrome, then ⚙︎ → *Install app* and *Enable notifications*. The app checks for updates every 30 s while it's open or in recent apps, and shows a system notification. Tapping the notification opens the ticket. Notifications don't arrive when the app is fully closed: true background push (Web Push/VAPID) is on the v2 list.
 
 ## 🎙 Voice brain-dump
 
@@ -58,6 +80,7 @@ npx wrangler login
 # 1. Create the database and paste the printed database_id into wrangler.toml
 npx wrangler d1 create daddy-do
 npm run db:init:remote
+# (Upgrading an existing DB from before rewards/scheduling? Run migrations/002_*.sql first, then db:init:remote.)
 
 # 2. Create the Pages project and set secrets
 npx wrangler pages project create daddy-do --production-branch main
@@ -91,16 +114,22 @@ All routes are under `/api`. Every route except `login`, `logout` and `session` 
 | POST | `/login` `{pin}` | Sets the session cookie |
 | GET | `/tickets[?closed=1]` | Open tickets plus anything closed in the last 30 days |
 | POST | `/tickets` | Create a ticket: `title`, `priority`, `category`, `description`, `location`, `due_date`, `recur_days`, `estimate_min` |
-| GET / PATCH / DELETE | `/tickets/:id` | PATCH writes an automatic audit-trail entry |
+| GET / PATCH / DELETE | `/tickets/:id` | PATCH accepts any field plus `scheduled_for`, `scheduled_time` and `note`. It writes the audit trail, awards points and notifies the other person. |
 | POST | `/tickets/:id/comments` `{body}` | |
 | GET / PUT | `/settings` | `members[]` (`fixer` / `requester`), `capacity_min` |
 | GET | `/stats` | |
+| GET | `/notifications` | The caller's notifications and unread count |
+| POST | `/notifications/read` `{ids?, ticket_id?}` | Marks the given ones read (all of them if no body) |
+| GET | `/points` | Totals, weekly history, recent ledger and the reward catalog |
+| POST / DELETE | `/rewards[/:id]` | Add or remove a reward |
+| POST | `/rewards/:id/redeem` | Spends the caller's points |
 | POST | `/transcribe` (raw audio body) | Whisper speech-to-text → `{text}` |
 | POST | `/parse` `{text, tz}` | Transcript → `{items[], questions[], not_tasks[]}` (proposals only; nothing is saved) |
 
 ## Ideas for v2
 
-- Email or push notifications when a ticket is filed, resolved or blocked (Cloudflare Email Workers / Web Push)
+- True background push via Web Push (VAPID), so phones buzz even when the app is fully closed
+- Morning-of reminders for tickets scheduled today
 - Photo attachments (R2), e.g. "this is the stain I mean"
 - Combined 🛒 shopping list built from every open ticket's parts list
 - Siri Shortcut / "Hey Siri, file a Daddy-Do": a single POST to `/api/tickets`

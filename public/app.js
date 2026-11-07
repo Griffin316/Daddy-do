@@ -23,7 +23,7 @@ const CAT_ICON = {
   repair: '🔧', cleaning: '🧽', yard: '🌿', errand: '🚗', kids: '🧸', admin: '📄', project: '🏗️', general: '📌',
 };
 const STATUS_LABEL = {
-  new: 'New', backlog: 'Backlog', scheduled: 'This week', in_progress: 'In progress',
+  new: 'New', backlog: 'Backlog', scheduled: 'Scheduled', in_progress: 'In progress',
   blocked: 'Blocked', resolved: 'Done – check it', closed: 'Closed',
 };
 
@@ -35,6 +35,10 @@ const state = {
   tickets: [],
   stats: null,
   backlogFilter: 'all',
+  notifs: [],
+  unread: 0,
+  lastNotifId: Number(localStorage.getItem('dd_last_notif') || 0),
+  points: null,
 };
 
 // ---------- utils ----------
@@ -105,6 +109,39 @@ function score(t) {
   return s;
 }
 
+function prettySched(t) {
+  if (!t.scheduled_for) return '';
+  const d = new Date(t.scheduled_for + 'T00:00:00');
+  const n = daysUntil(t.scheduled_for);
+  let day = n === 0 ? 'Today' : n === 1 ? 'Tomorrow' : d.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' });
+  if (t.scheduled_time) {
+    const [h, m] = t.scheduled_time.split(':').map(Number);
+    day += ` ${((h + 11) % 12) + 1}${m ? ':' + String(m).padStart(2, '0') : ''}${h < 12 ? 'am' : 'pm'}`;
+  }
+  return day;
+}
+
+// Mirrors the server's points rules (functions/api/[[route]].js) for previews.
+const SIZE_POINTS = { 15: 10, 30: 20, 60: 35, 180: 80, 480: 180 };
+const PRIORITY_MULT = { 1: 1.5, 2: 1.25, 3: 1, 4: 1 };
+function pointsFor(t) {
+  const base = SIZE_POINTS[t.estimate_min] ?? (t.estimate_min ? Math.round(t.estimate_min * 0.4) + 5 : 15);
+  return Math.round(base * (PRIORITY_MULT[t.priority] || 1));
+}
+const LEVELS = [
+  [0, 'Apprentice', '🔰'], [200, 'Handy', '🔧'], [500, 'Fix-it Pro', '🛠️'],
+  [1000, 'Master of the House', '🏠'], [2000, 'Household Legend', '🏆'], [4000, 'Mythical', '⚡'],
+];
+function levelOf(lifetime) {
+  let i = 0;
+  while (i + 1 < LEVELS.length && lifetime >= LEVELS[i + 1][0]) i++;
+  const [from, name, icon] = LEVELS[i];
+  const next = LEVELS[i + 1];
+  return { n: i + 1, name, icon, from, next: next?.[0], nextName: next?.[1], pct: next ? Math.round(((lifetime - from) / (next[0] - from)) * 100) : 100 };
+}
+const myTotals = (name = state.me) => (state.points?.totals || []).find((x) => x.member === name)
+  || { balance: 0, lifetime: 0, last7: 0, last30: 0, jobs: 0, ontime: 0, thanks: 0 };
+
 const isFixer = () => (state.members.find((m) => m.name === state.me) || {}).role === 'fixer';
 const OPEN = ['new', 'backlog', 'scheduled', 'in_progress', 'blocked'];
 
@@ -130,9 +167,48 @@ async function api(path, opts = {}) {
 }
 
 async function refresh() {
-  const [t, s] = await Promise.all([api('/tickets'), api('/stats')]);
+  const [t, s] = await Promise.all([api('/tickets'), api('/stats'), refreshNotifs(), refreshPoints()]);
   state.tickets = t.tickets;
   state.stats = s.stats;
+}
+
+async function refreshPoints() {
+  try { state.points = await api('/points'); } catch { /* optional */ }
+}
+
+// Pull notifications; surface anything new as a toast + Android system notification.
+async function refreshNotifs() {
+  const r = await api('/notifications');
+  state.notifs = r.notifications;
+  state.unread = r.unread;
+  const fresh = r.notifications.filter((n) => !n.read_at && n.id > state.lastNotifId);
+  if (fresh.length) {
+    const maxId = Math.max(...fresh.map((n) => n.id));
+    const first = state.lastNotifId > 0; // don't blast on the very first load
+    state.lastNotifId = maxId;
+    localStorage.setItem('dd_last_notif', String(maxId));
+    if (first) {
+      toast(fresh.length === 1 ? `🔔 ${fresh[0].body.startsWith(fresh[0].actor) ? '' : fresh[0].actor + ': '}${fresh[0].body}` : `🔔 ${fresh.length} new updates`);
+      for (const n of fresh.slice(0, 3)) systemNotify(n);
+    }
+  }
+  updateBell();
+}
+
+async function systemNotify(n) {
+  if (!('Notification' in window) || Notification.permission !== 'granted' || !document.hidden) return;
+  try {
+    const reg = await navigator.serviceWorker?.getRegistration();
+    const opts = { body: n.body, tag: 'dd-' + n.id, icon: '/icon-192.png', badge: '/icon-192.png', data: { ticket: n.ticket_id } };
+    if (reg) await reg.showNotification(`Daddy-Do · ${n.actor}`, opts);
+  } catch { /* ignore */ }
+}
+
+function updateBell() {
+  const b = $('#bell-count');
+  if (!b) return;
+  b.textContent = state.unread > 9 ? '9+' : String(state.unread);
+  b.hidden = !state.unread;
 }
 
 async function patch(id, body, msg) {
@@ -141,7 +217,11 @@ async function patch(id, body, msg) {
     const i = state.tickets.findIndex((x) => x.id === id);
     if (i >= 0) state.tickets[i] = { ...state.tickets[i], ...r.ticket };
     if (r.spawned) state.tickets.unshift(r.spawned);
-    if (msg) toast(msg);
+    if (r.award) {
+      toast(`⭐ +${r.award.points} pts${r.award.bonus ? ` (incl. +${r.award.bonus} on-time bonus)` : ''} — nice work!`);
+      if (i >= 0) state.tickets[i].points_earned = r.award.points;
+      refreshPoints().then(render);
+    } else if (msg) toast(msg);
     api('/stats').then((s) => { state.stats = s.stats; });
     render();
     return r.ticket;
@@ -162,6 +242,9 @@ async function boot() {
     if (!state.members.some((m) => m.name === state.me)) return renderWhoAmI();
     await refresh();
     render();
+    // Deep link from a tapped Android notification: /?ticket=123
+    const tid = Number(new URLSearchParams(location.search).get('ticket'));
+    if (tid) { history.replaceState(null, '', '/'); openTicket(tid); }
   } catch (e) {
     app.innerHTML = `<p class="empty">${esc(e.message)}</p>`;
   }
@@ -229,6 +312,7 @@ function tabsFor() {
       ['backlog', 'Backlog', open.filter((t) => t.status !== 'new' && t.sprint_week !== THIS_WEEK()).length],
       ['new', '+ New'],
       ['done', 'Done'],
+      ['rewards', '🏆 Rewards'],
       ['settings', '⚙︎'],
     ];
   }
@@ -238,6 +322,7 @@ function tabsFor() {
     ['mine', 'My requests', toVerify, toVerify > 0],
     ['week', "This week's plan", week],
     ['all', 'Everything'],
+    ['rewards', '🏆 Rewards'],
     ['settings', '⚙︎'],
   ];
 }
@@ -247,7 +332,15 @@ function render() {
   if (!tabs.some(([k]) => k === state.tab)) state.tab = tabs[0][0];
   localStorage.setItem('dd_tab', state.tab);
 
-  $('#who').innerHTML = `${esc(state.me)} <button class="link small" id="switch">switch</button>`;
+  const pts = myTotals();
+  $('#who').innerHTML = `
+    ${isFixer() || pts.balance ? `<button class="pts-chip" id="pts-chip" title="Your points">⭐ ${pts.balance || 0}</button>` : ''}
+    <button class="bell" id="bell" aria-label="Notifications">🔔<span class="badge" id="bell-count" hidden></span></button>
+    <span class="me">${esc(state.me)}</span> <button class="link small" id="switch">switch</button>`;
+  $('#bell').onclick = openNotifications;
+  const pc = $('#pts-chip');
+  if (pc) pc.onclick = () => { state.tab = 'rewards'; render(); };
+  updateBell();
   $('#switch').onclick = () => { state.me = ''; localStorage.removeItem('dd_me'); renderWhoAmI(); };
 
   const nav = $('#tabs');
@@ -260,7 +353,7 @@ function render() {
 
   const views = {
     talk: viewVoice, new: viewNew, mine: viewMine, week: viewWeek, triage: viewTriage,
-    backlog: viewBacklog, done: viewDone, all: viewAll, settings: viewSettings,
+    backlog: viewBacklog, done: viewDone, all: viewAll, settings: viewSettings, rewards: viewRewards,
   };
   (views[state.tab] || viewNew)();
 }
@@ -273,19 +366,22 @@ function ticketCard(t, actions = []) {
     `<span class="status ${t.status}">${STATUS_LABEL[t.status]}</span>`,
     `${CAT_ICON[t.category] || '📌'} ${esc(t.category)}`,
     t.location ? `📍 ${esc(t.location)}` : '',
+    t.scheduled_for && OPEN.includes(t.status) ? `<b class="sched">📅 ${esc(prettySched(t))}</b>` : '',
     t.estimate_min ? `⏱ ${fmtMin(t.estimate_min)}` : '<span>⏱ not sized</span>',
     dueText(t),
+    t.points_earned ? `<b class="gold">⭐ ${t.points_earned}</b>` : (isFixer() && OPEN.includes(t.status) && t.estimate_min ? `<span class="muted">☆ ${pointsFor(t)} pts</span>` : ''),
     t.recur_days ? `🔁 every ${t.recur_days}d` : '',
     t.comment_count ? `💬 ${t.comment_count}` : '',
     `#${t.id} · ${esc(t.requester)} · ${ago(t.created_at)}`,
   ].filter(Boolean).map((x) => `<span>${x}</span>`).join('');
   const blocked = t.status === 'blocked' && t.blocked_reason
     ? `<div class="small" style="margin-top:6px">🚧 ${esc(t.blocked_reason)}</div>` : '';
+  const upd = t.last_update ? `<div class="last-upd small">💬 ${esc(t.last_update.length > 140 ? t.last_update.slice(0, 140) + '…' : t.last_update)}</div>` : '';
   const btns = actions.map(([key, label, cls = '']) =>
     `<button class="btn sm ${cls}" data-act="${key}" data-id="${t.id}">${label}</button>`).join('');
   return `<div class="card ticket p${t.priority}" data-open="${t.id}">
     <div class="title">${esc(t.title)}</div>
-    <div class="meta">${meta}</div>${blocked}
+    <div class="meta">${meta}</div>${blocked}${upd}
     ${btns ? `<div class="actions">${btns}</div>` : ''}
   </div>`;
 }
@@ -307,11 +403,12 @@ function wireCards(root, handlers) {
 
 // Shared fixer actions
 const fixerHandlers = {
+  update: (t) => openUpdate(t),
   schedule: (t) => patch(t.id, { status: 'scheduled', sprint_week: THIS_WEEK() }, 'Added to this week'),
   next: (t) => patch(t.id, { status: 'scheduled', sprint_week: NEXT_WEEK() }, 'Planned for next week'),
   unplan: (t) => patch(t.id, { status: 'backlog', sprint_week: null }, 'Moved back to backlog'),
   start: (t) => patch(t.id, { status: 'in_progress', sprint_week: t.sprint_week || THIS_WEEK() }, 'Started'),
-  done: (t) => patch(t.id, { status: 'resolved' }, `Resolved — ${t.requester} will be asked to check it`),
+  done: (t) => openUpdate(t, 'resolved'),
   block: (t) => {
     const why = prompt('What is it blocked on? (e.g. "need parts from Home Depot", "need your decision on color")');
     if (why !== null) patch(t.id, { status: 'blocked', blocked_reason: why || 'waiting' }, 'Marked blocked');
@@ -463,9 +560,9 @@ function viewWeek() {
   const blocked = weekTickets.filter((t) => t.status === 'blocked').concat(blockedElsewhere);
   const done = weekTickets.filter((t) => t.status === 'resolved' || t.status === 'closed');
   const fx = isFixer();
-  const todoActs = fx ? [['start', '▶ Start'], ['done', '✓ Done', 'ok'], ['block', 'Blocked'], ['next', '→ Next week']] : [];
-  const progActs = fx ? [['done', '✓ Done', 'ok'], ['block', 'Blocked']] : [];
-  const blockActs = fx ? [['unblock', 'Unblock']] : [];
+  const todoActs = fx ? [['update', '📝 Update', 'primary'], ['start', '▶ Start'], ['done', '✓ Done', 'ok'], ['next', '→ Next week']] : [];
+  const progActs = fx ? [['update', '📝 Update', 'primary'], ['done', '✓ Done', 'ok']] : [];
+  const blockActs = fx ? [['update', '📝 Update', 'primary'], ['unblock', 'Unblock']] : [];
   const p1Unplanned = state.tickets.filter((t) => t.priority === 1 && OPEN.includes(t.status) && t.sprint_week !== wk);
 
   app.innerHTML = `
@@ -474,13 +571,33 @@ function viewWeek() {
     ${p1Unplanned.length ? `<div class="card" style="border-color:var(--p1)"><b class="overdue">⚠ ${p1Unplanned.length} P1 ticket(s) not in this week's plan</b>
       ${p1Unplanned.map((t) => ticketCard(t, fx ? [['schedule', '+ Add to this week', 'primary']] : [])).join('')}</div>` : ''}
     ${inProg.length ? `<h3>In progress</h3>${inProg.map((t) => ticketCard(t, progActs)).join('')}` : ''}
-    <h3>Planned</h3>
-    ${todo.length ? todo.map((t) => ticketCard(t, todoActs)).join('') : `<p class="empty">Nothing planned yet.${fx ? ' Pull from Backlog or hit Auto-fill.' : ''}</p>`}
+    ${todo.length ? byDay(todo, todoActs) : `<h3>Planned</h3><p class="empty">Nothing planned yet.${fx ? ' Pull from Backlog or hit Auto-fill.' : ''}</p>`}
     ${blocked.length ? `<h3>Blocked</h3>${blocked.map((t) => ticketCard(t, blockActs)).join('')}` : ''}
     ${done.length ? `<h3>Done this week</h3>${done.map((t) => ticketCard(t)).join('')}` : ''}`;
   wireCards(app, fixerHandlers);
   const af = $('#autofill');
   if (af) af.onclick = autoFill;
+}
+
+// Planned tickets grouped by their scheduled day; undated ones go under "Anytime this week".
+function byDay(list, acts) {
+  const groups = new Map();
+  const sorted = [...list].sort((a, b) => (a.scheduled_for || '9999').localeCompare(b.scheduled_for || '9999')
+    || (a.scheduled_time || '99').localeCompare(b.scheduled_time || '99') || score(b) - score(a));
+  for (const t of sorted) {
+    const key = t.scheduled_for || '';
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(t);
+  }
+  return [...groups].map(([day, ts]) => {
+    let label = 'Anytime this week';
+    if (day) {
+      const n = daysUntil(day);
+      const d = new Date(day + 'T00:00:00').toLocaleDateString(undefined, { weekday: 'long', month: 'short', day: 'numeric' });
+      label = `📅 ${n === 0 ? 'Today · ' : n === 1 ? 'Tomorrow · ' : n < 0 ? '⚠ Missed · ' : ''}${d}`;
+    }
+    return `<h3>${label}</h3>${ts.map((t) => ticketCard(t, acts)).join('')}`;
+  }).join('');
 }
 
 async function autoFill() {
@@ -522,7 +639,8 @@ function viewTriage() {
           ${[1, 2, 3, 4].map((p) => `<button class="chip ${t.priority === p ? 'on' : ''}" data-act="prio" data-p="${p}">P${p}</button>`).join('')}
         </div>
         <div class="actions">
-          <button class="btn sm primary" data-act="schedule">This week</button>
+          <button class="btn sm primary" data-act="update">📅 Schedule</button>
+          <button class="btn sm" data-act="schedule">This week</button>
           <button class="btn sm" data-act="accept">Backlog</button>
           <button class="btn sm" data-act="decline">Won't do</button>
         </div>
@@ -561,7 +679,7 @@ function viewBacklog() {
     ${list.length ? list.map((t) => ticketCard(t,
       t.status === 'blocked' ? [['unblock', 'Unblock']]
         : t.sprint_week === NEXT_WEEK() ? [['schedule', '+ This week', 'primary'], ['unplan', 'Unplan']]
-          : [['schedule', '+ This week', 'primary'], ['next', 'Next week'], ['done', '✓ Already done', 'ok']])).join('')
+          : [['update', '📅 Schedule', 'primary'], ['schedule', '+ This week'], ['next', 'Next week'], ['done', '✓ Already done', 'ok']])).join('')
       : '<p class="empty">Nothing here.</p>'}
     <p class="muted small center">Sorted by priority, then due date, then age — old requests float up so nothing rots.</p>`;
   $('#bf').querySelectorAll('[data-f]').forEach((b) => {
@@ -604,6 +722,14 @@ function viewSettings() {
       <p class="muted small">Be honest — this is what "This week" plans against. Over-capacity shows red so you can negotiate what slips.</p>
       <button class="btn primary block" style="margin-top:12px">Save</button>
     </form>
+    <div class="card">
+      <b>Phone notifications</b>
+      <p class="muted small">Get a buzz on this phone when there's an update, even when the app is in the background.</p>
+      <div class="row">
+        <button class="btn sm" id="notif-on">${'Notification' in window && Notification.permission === 'granted' ? '✓ Enabled — send a test' : '🔔 Enable notifications'}</button>
+        <button class="btn sm" id="install" ${installPrompt ? '' : 'hidden'}>📲 Install app</button>
+      </div>
+    </div>
     <div class="card row spread">
       <span class="small muted">Logged in on this device</span>
       <button class="btn sm danger" id="logout">Log out</button>
@@ -625,6 +751,8 @@ function viewSettings() {
       render();
     } catch (er) { toast(er.message); }
   };
+  $('#notif-on').onclick = enableNotifications;
+  $('#install').onclick = async () => { if (installPrompt) { installPrompt.prompt(); installPrompt = null; } };
   $('#logout').onclick = async () => { await api('/logout', { method: 'POST' }).catch(() => {}); renderLogin(); };
 }
 
@@ -900,6 +1028,239 @@ function viewVoiceReview() {
   };
 }
 
+// ---------- "Post update" dialog: status + schedule + message in one go ----------
+
+function isoIn(days) { const d = new Date(); d.setDate(d.getDate() + days); return isoDate(d); }
+function nextDow(dow) { // 0=Sun..6=Sat; today counts
+  const d = new Date();
+  d.setDate(d.getDate() + ((dow - d.getDay() + 7) % 7));
+  return isoDate(d);
+}
+
+function openUpdate(t, presetStatus) {
+  const u = {
+    status: presetStatus || t.status,
+    date: t.scheduled_for || '',
+    time: t.scheduled_time || '',
+  };
+  const choices = [
+    ['scheduled', '📅 Scheduled'], ['in_progress', '▶ Working on it'],
+    ['blocked', '🚧 Blocked'], ['resolved', '✅ Done'],
+  ];
+  const draw = () => {
+    const pts = pointsFor(t);
+    const deadline = u.date || t.due_date;
+    const onTime = deadline && isoDate(new Date()) <= deadline;
+    modalBody.innerHTML = `
+      <div class="row spread"><b>Update: ${esc(t.title)}</b><button class="btn sm" id="uclose">✕</button></div>
+      <p class="muted small">${esc(t.requester)} gets notified with whatever you post here.</p>
+      <label>Status</label>
+      <div class="chips" id="ust">${choices.map(([k, l]) => `<button type="button" class="chip ${u.status === k ? 'on' : ''}" data-s="${k}">${l}</button>`).join('')}</div>
+      ${u.status === 'resolved' ? `<div class="card gold-card small" style="margin-top:10px">⭐ Completing earns <b>${pts} pts</b>${onTime ? ` + <b>${Math.max(5, Math.round(pts * 0.25))}</b> on-time bonus` : ''}, plus <b>10</b> more when ${esc(t.requester)} approves.</div>` : ''}
+      ${u.status !== 'resolved' ? `
+        <label>When will you do it?</label>
+        <div class="chips" id="uq">
+          <button type="button" class="chip" data-d="${isoIn(0)}">Today</button>
+          <button type="button" class="chip" data-d="${isoIn(1)}">Tomorrow</button>
+          <button type="button" class="chip" data-d="${nextDow(6)}">Sat</button>
+          <button type="button" class="chip" data-d="${nextDow(0)}">Sun</button>
+          <button type="button" class="chip" data-d="">No date</button>
+        </div>
+        <div class="grid2" style="margin-top:6px">
+          <input type="date" id="ud" value="${esc(u.date)}">
+          <input type="time" id="ut" value="${esc(u.time)}">
+        </div>` : ''}
+      ${u.status === 'blocked' ? `<label>Blocked on</label><input type="text" id="ub" value="${esc(t.blocked_reason || '')}" placeholder="e.g. waiting on a part from Amazon">` : ''}
+      <label>Message for ${esc(t.requester)} <span class="muted">(optional)</span></label>
+      <textarea id="un" rows="3" placeholder="${u.status === 'resolved' ? 'e.g. New washer in — no more drip!' : 'e.g. Picked up the part, doing it Saturday morning'}"></textarea>
+      <button class="btn primary block" id="usend" style="margin-top:12px">Post update</button>`;
+    $('#uclose').onclick = () => modal.close();
+    $('#ust').querySelectorAll('[data-s]').forEach((b) => {
+      b.onclick = () => { keepNote(); u.status = b.dataset.s; draw(); };
+    });
+    $('#uq')?.querySelectorAll('[data-d]').forEach((b) => {
+      b.onclick = () => { keepNote(); u.date = b.dataset.d; if (!u.date) u.time = ''; draw(); };
+    });
+    const ud = $('#ud'); const ut = $('#ut');
+    if (ud) ud.onchange = () => { u.date = ud.value; };
+    if (ut) ut.onchange = () => { u.time = ut.value; };
+    if (u.note) $('#un').value = u.note;
+    $('#usend').onclick = send;
+  };
+  const keepNote = () => { u.note = $('#un')?.value || ''; };
+  const send = async () => {
+    keepNote();
+    const body = { note: u.note.trim() };
+    if (u.status !== t.status) body.status = u.status;
+    if (u.status !== 'resolved') {
+      if ((u.date || null) !== (t.scheduled_for || null)) body.scheduled_for = u.date || null;
+      if ((u.time || null) !== (t.scheduled_time || null)) body.scheduled_time = u.time || null;
+      if (u.status === 'scheduled' && !u.date && !t.sprint_week) body.sprint_week = THIS_WEEK();
+    }
+    if (u.status === 'blocked') body.blocked_reason = $('#ub').value.trim() || 'waiting';
+    if (Object.keys(body).length === 1 && !body.note) { modal.close(); return; }
+    $('#usend').disabled = true;
+    const r = await patch(t.id, body, `Update sent to ${t.requester} 🔔`);
+    if (r) modal.close(); else $('#usend').disabled = false;
+  };
+  if (!modal.open) modal.showModal();
+  draw();
+}
+
+// ---------- rewards / points ----------
+
+function weekStreak(member) {
+  const weeks = new Set((state.points?.weekly || []).filter((w) => w.member === member && w.pts > 0).map((w) => w.week));
+  let wk = THIS_WEEK();
+  const back = (iso) => { const d = new Date(iso + 'T00:00:00'); d.setDate(d.getDate() - 7); return isoDate(d); };
+  if (!weeks.has(wk)) wk = back(wk); // this week isn't over yet
+  let n = 0;
+  while (weeks.has(wk)) { n++; wk = back(wk); }
+  return n;
+}
+
+function viewRewards() {
+  const fixers = state.members.filter((m) => m.role === 'fixer');
+  const P = state.points || { rewards: [], history: [] };
+  const me = isFixer();
+  app.innerHTML = `
+    ${fixers.map((f) => {
+      const t = myTotals(f.name);
+      const lv = levelOf(t.lifetime || 0);
+      const streak = weekStreak(f.name);
+      return `<div class="card score">
+        <div class="row spread">
+          <div><div class="lv">${lv.icon} Level ${lv.n} · ${esc(lv.name)}</div><div class="muted small">${esc(f.name)}</div></div>
+          <div class="center"><div class="big-pts">⭐ ${t.balance || 0}</div><div class="muted small">points to spend</div></div>
+        </div>
+        <div class="capbar gold-bar"><div style="width:${lv.pct}%"></div></div>
+        <div class="small muted">${lv.next ? `${lv.next - (t.lifetime || 0)} pts to ${esc(lv.nextName)}` : 'Max level — legend status'} · ${t.lifetime || 0} earned all-time</div>
+        <div class="stats" style="margin:12px 0 0">
+          <div class="stat"><b>${t.last7 || 0}</b><span>pts this week</span></div>
+          <div class="stat"><b>${t.jobs || 0}</b><span>jobs done</span></div>
+          <div class="stat"><b>${t.ontime || 0}</b><span>on time ⏱</span></div>
+          <div class="stat"><b>${t.thanks || 0}</b><span>approved ✓</span></div>
+          <div class="stat"><b>${streak}🔥</b><span>week streak</span></div>
+        </div>
+      </div>`;
+    }).join('')}
+    <h3>Reward shop</h3>
+    ${P.rewards.length ? P.rewards.map((r) => {
+      const bal = myTotals().balance || 0;
+      return `<div class="card row spread">
+        <div><span style="font-size:22px">${esc(r.emoji)}</span> <b>${esc(r.title)}</b><div class="muted small">⭐ ${r.cost} pts</div></div>
+        <div class="row">
+          ${me ? (bal >= r.cost ? `<button class="btn sm ok" data-redeem="${r.id}">Redeem</button>` : `<span class="muted small">${r.cost - bal} more</span>`) : ''}
+          ${!me ? `<button class="btn sm danger" data-rm-reward="${r.id}">Remove</button>` : ''}
+        </div>
+      </div>`;
+    }).join('') : '<p class="empty">No rewards yet.</p>'}
+    ${!me ? `<form id="rf" class="card">
+      <b>Add a reward</b>
+      <div class="row" style="margin-top:8px">
+        <input type="text" name="emoji" value="🎁" style="width:56px;text-align:center">
+        <input type="text" name="title" placeholder="e.g. Saturday morning golf" style="flex:1;width:auto" required>
+        <input type="number" name="cost" placeholder="pts" min="1" style="width:90px" required>
+      </div>
+      <button class="btn primary" style="margin-top:8px">Add reward</button>
+      <p class="muted small">Rough guide: a 30-min job ≈ 20 pts, a 1-hour job ≈ 35, a half-day project ≈ 80–180.</p>
+    </form>` : ''}
+    <h3>Recent points</h3>
+    ${P.history.length ? `<div class="card">${P.history.map((h) => `
+      <div class="row spread hist">
+        <span class="small">${h.kind === 'redeem' ? '🎁' : h.kind === 'ontime' ? '⏱' : h.kind === 'thanks' ? '✓' : '✅'} ${esc(h.title || h.note)}${h.kind === 'ontime' ? ' <span class="muted">(on time)</span>' : h.kind === 'thanks' ? ` <span class="muted">(${esc(h.note)})</span>` : ''}</span>
+        <b class="${h.points > 0 ? 'gold' : 'muted'}">${h.points > 0 ? '+' : ''}${h.points}</b>
+      </div>`).join('')}</div>` : '<p class="empty">Finish a ticket to earn your first points! 💪</p>'}
+    <details class="card small"><summary class="muted">How points work</summary>
+      <p>Size: 15m = 10 · 30m = 20 · 1h = 35 · 3h = 80 · day = 180. P1 ×1.5, P2 ×1.25.<br>
+      +25% if done on or before the scheduled day / due date. +10 when the requester approves ✓.<br>
+      Reopened tickets lose their points until they're really done.</p>
+    </details>`;
+
+  app.querySelectorAll('[data-redeem]').forEach((b) => {
+    b.onclick = async () => {
+      const r = P.rewards.find((x) => x.id === +b.dataset.redeem);
+      if (!confirm(`Spend ${r.cost} pts on "${r.title}"?`)) return;
+      try {
+        await api(`/rewards/${r.id}/redeem`, { method: 'POST' });
+        toast(`🎉 Enjoy: ${r.title}`);
+        await refreshPoints();
+        render();
+      } catch (e) { toast(e.message); }
+    };
+  });
+  app.querySelectorAll('[data-rm-reward]').forEach((b) => {
+    b.onclick = async () => {
+      if (!confirm('Remove this reward?')) return;
+      await api(`/rewards/${b.dataset.rmReward}`, { method: 'DELETE' });
+      await refreshPoints();
+      render();
+    };
+  });
+  const rf = $('#rf');
+  if (rf) {
+    rf.onsubmit = async (e) => {
+      e.preventDefault();
+      try {
+        await api('/rewards', { method: 'POST', body: { emoji: rf.emoji.value, title: rf.title.value, cost: +rf.cost.value } });
+        toast('Reward added');
+        await refreshPoints();
+        render();
+      } catch (er) { toast(er.message); }
+    };
+  }
+}
+
+// ---------- notification centre ----------
+
+const NOTIF_ICON = { new: '🆕', status: '🔄', update: '💬', comment: '💬', scheduled: '📅', resolved: '✅', points: '⭐', reward: '🎉' };
+
+function openNotifications() {
+  const draw = () => {
+    modalBody.innerHTML = `
+      <div class="row spread"><b>🔔 Notifications</b>
+        <div class="row">${state.unread ? '<button class="btn sm" id="nall">Mark all read</button>' : ''}<button class="btn sm" id="nclose">✕</button></div></div>
+      ${'Notification' in window && Notification.permission !== 'granted'
+        ? '<button class="btn sm block" id="nperm" style="margin-top:10px">📲 Also buzz my phone for updates</button>' : ''}
+      <div style="margin-top:10px">
+      ${state.notifs.length ? state.notifs.map((n) => `
+        <div class="notif ${n.read_at ? '' : 'unread'}" data-n="${n.id}" data-t="${n.ticket_id || ''}">
+          <span class="ni">${NOTIF_ICON[n.kind] || '🔔'}</span>
+          <div class="grow"><div class="small">${esc(n.body)}</div><div class="muted small">${esc(n.actor)} · ${ago(n.created_at)}</div></div>
+        </div>`).join('') : '<p class="empty">No notifications yet.</p>'}
+      </div>`;
+    $('#nclose').onclick = () => modal.close();
+    const na = $('#nall');
+    if (na) na.onclick = async () => {
+      const r = await api('/notifications/read', { method: 'POST', body: {} });
+      state.notifs = r.notifications; state.unread = r.unread; updateBell(); draw();
+    };
+    const np = $('#nperm');
+    if (np) np.onclick = async () => { await enableNotifications(); draw(); };
+    modalBody.querySelectorAll('[data-n]').forEach((el) => {
+      el.onclick = async () => {
+        const r = await api('/notifications/read', { method: 'POST', body: { ids: [+el.dataset.n] } });
+        state.notifs = r.notifications; state.unread = r.unread; updateBell();
+        if (el.dataset.t) openTicket(+el.dataset.t);
+        else if (/pts|reward|cashed/i.test(el.textContent)) { modal.close(); state.tab = 'rewards'; render(); }
+        else draw();
+      };
+    });
+  };
+  if (!modal.open) modal.showModal();
+  draw();
+}
+
+async function enableNotifications() {
+  if (!('Notification' in window)) return toast('This browser does not support notifications');
+  const perm = await Notification.requestPermission();
+  if (perm !== 'granted') return toast('Notifications blocked — allow them in Chrome site settings');
+  const reg = await navigator.serviceWorker?.ready;
+  await reg?.showNotification('Daddy-Do', { body: "✓ You'll get a buzz here when there's an update.", icon: '/icon-192.png', badge: '/icon-192.png' });
+  toast('Notifications on 🔔');
+  if (state.tab === 'settings') render();
+}
+
 // ---------- ticket detail modal ----------
 
 async function openTicket(id) {
@@ -910,9 +1271,21 @@ async function openTicket(id) {
   const t = data.ticket;
   const fx = isFixer();
   const canEdit = fx || t.requester === state.me;
+  if (state.notifs.some((n) => n.ticket_id === t.id && !n.read_at)) {
+    api('/notifications/read', { method: 'POST', body: { ticket_id: t.id } }).then((r) => {
+      state.notifs = r.notifications; state.unread = r.unread; updateBell();
+    }).catch(() => {});
+  }
+  const earned = data.points.filter((p) => p.points > 0);
   modalBody.innerHTML = `
     <div class="row spread"><span class="muted small">#${t.id} · opened by ${esc(t.requester)} ${ago(t.created_at)}</span>
       <button class="btn sm" id="mclose">✕</button></div>
+    <div class="row" style="margin-top:8px">
+      <span class="status ${t.status}">${STATUS_LABEL[t.status]}</span>
+      ${t.scheduled_for ? `<b class="sched">📅 ${esc(prettySched(t))}</b>` : ''}
+      ${earned.length ? `<b class="gold">⭐ ${earned.reduce((n, p) => n + p.points, 0)} pts earned</b>` : (t.estimate_min ? `<span class="muted small">☆ worth ${pointsFor(t)} pts</span>` : '')}
+    </div>
+    ${fx && OPEN.includes(t.status) ? '<button class="btn primary block" id="mupd" style="margin-top:10px">📝 Post update / schedule</button>' : ''}
     <form id="ef">
       <input type="text" name="title" class="big-input" value="${esc(t.title)}" ${canEdit ? '' : 'disabled'} style="margin-top:8px">
       <label>Details</label>
@@ -934,6 +1307,8 @@ async function openTicket(id) {
         </select></div>
         <div><label>Location</label><input type="text" name="location" value="${esc(t.location)}" ${canEdit ? '' : 'disabled'}></div>
         <div><label>Needed by</label><input type="date" name="due_date" value="${esc(t.due_date || '')}" ${canEdit ? '' : 'disabled'}></div>
+        <div><label>Scheduled day</label><input type="date" name="scheduled_for" value="${esc(t.scheduled_for || '')}" ${fx ? '' : 'disabled'}></div>
+        <div><label>Scheduled time</label><input type="time" name="scheduled_time" value="${esc(t.scheduled_time || '')}" ${fx ? '' : 'disabled'}></div>
         <div><label>Planned week (Monday)</label><input type="date" name="sprint_week" value="${esc(t.sprint_week || '')}" ${fx ? '' : 'disabled'}></div>
         <div><label>Repeat every (days, 0 = no)</label><input type="number" name="recur_days" min="0" value="${t.recur_days}" ${canEdit ? '' : 'disabled'}></div>
       </div>
@@ -949,11 +1324,13 @@ async function openTicket(id) {
         <span class="by">${esc(c.author)}</span> <span class="muted small">${ago(c.created_at)}</span><br>${c.is_system ? '⚙︎ ' : ''}<span style="white-space:pre-wrap">${esc(c.body)}</span></div>`).join('')}
     </div>
     <form id="cf" class="row" style="margin-top:8px">
-      <input type="text" name="body" class="grow" placeholder="Add a comment…" style="flex:1;width:auto">
+      <input type="text" name="body" class="grow" placeholder="${fx ? `Post an update for ${esc(t.requester)}…` : 'Add a comment…'}" style="flex:1;width:auto">
       <button class="btn">Send</button>
     </form>`;
 
   $('#mclose').onclick = () => modal.close();
+  const mu = $('#mupd');
+  if (mu) mu.onclick = () => openUpdate(state.tickets.find((x) => x.id === t.id) || t);
   $('#ef').onsubmit = async (e) => {
     e.preventDefault();
     const f = e.target;
@@ -961,7 +1338,7 @@ async function openTicket(id) {
     for (const el of f.elements) {
       if (!el.name || el.disabled) continue;
       body[el.name] = ['priority', 'estimate_min', 'recur_days'].includes(el.name) ? +el.value
-        : ['due_date', 'sprint_week'].includes(el.name) ? (el.value || null) : el.value;
+        : ['due_date', 'sprint_week', 'scheduled_for', 'scheduled_time'].includes(el.name) ? (el.value || null) : el.value;
     }
     // Snap the planned week to its Monday.
     if (body.sprint_week) body.sprint_week = mondayOf(new Date(body.sprint_week + 'T00:00:00'));
@@ -995,10 +1372,20 @@ modal.addEventListener('close', () => render());
 
 // Keep both phones in sync without websockets: refresh when the app regains focus and every minute.
 async function softRefresh() {
-  if (!state.me || modal.open || state.tab === 'talk' || document.activeElement?.matches('input, textarea')) return;
+  if (!state.me) return;
+  // Always check notifications (cheap); only re-render the page when it won't disrupt typing.
+  if (modal.open || state.tab === 'talk' || document.activeElement?.matches('input, textarea, select')) {
+    try { await refreshNotifs(); } catch { /* ignore */ }
+    return;
+  }
   try { await refresh(); render(); } catch { /* ignore */ }
 }
 document.addEventListener('visibilitychange', () => { if (!document.hidden) softRefresh(); });
-setInterval(softRefresh, 60000);
+setInterval(softRefresh, 30000);
+
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
+// Android/Chrome "Install app" prompt — offered from Settings.
+let installPrompt = null;
+window.addEventListener('beforeinstallprompt', (e) => { e.preventDefault(); installPrompt = e; });
 
 boot();
