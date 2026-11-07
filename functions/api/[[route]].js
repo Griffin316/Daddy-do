@@ -169,7 +169,7 @@ async function createTicket(db, request, actor) {
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *`,
   ).bind(t.title, t.description, requester, t.priority, t.category, t.location, t.due_date,
     t.estimate_min, t.assignee, t.recur_days).first();
-  await audit(db, row.id, actor, requester === actor ? 'Opened ticket' : `Opened ticket on behalf of ${requester}`);
+  await audit(db, row.id, actor, requester === actor ? 'Added this Do' : `Added this Do for ${requester}`);
   if (requester === actor) {
     // Let the fixer(s) know a new request arrived.
     const fixers = members.filter((m) => m.role === 'fixer' && m.name !== actor).map((m) => m.name);

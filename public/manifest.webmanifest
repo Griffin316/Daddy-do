@@ -1,7 +1,7 @@
 {
   "name": "Daddy-Do",
   "short_name": "Daddy-Do",
-  "description": "Household chore ticketing",
+  "description": "The household Do list",
   "id": "/",
   "start_url": "/",
   "scope": "/",

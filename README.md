@@ -1,6 +1,8 @@
 # 🛠️ Daddy-Do
 
-**A help desk for your house.** Your partner files tickets, and you triage them and plan them against the hours you actually have. Nothing gets forgotten, and nobody has to nag.
+**A help desk for your house.** Your partner adds Do’s, and you triage them and plan them against the hours you actually have. Nothing gets forgotten, and nobody has to nag.
+
+> **Naming:** in the app, requests are called **Do’s** (one **Do**), never "tickets". This README uses "ticket" in a few technical sections, and the code and API keep `tickets` as the internal name (`/api/tickets`, the `tickets` table).
 
 ## The problem
 

@@ -433,7 +433,7 @@ const fixerHandlers = {
 function viewNew() {
   const draft = { priority: 3, category: 'general', estimate_min: 0 };
   app.innerHTML = `
-    <h2>${isFixer() ? 'New ticket' : 'What needs doing?'}</h2>
+    <h2>${isFixer() ? 'New Do' : 'What needs doing?'}</h2>
     <form id="newf" class="card">
       <input name="title" class="big-input" placeholder="e.g. Kitchen faucet is dripping" maxlength="200" required autofocus>
       <label>How urgent?</label>
@@ -461,9 +461,9 @@ function viewNew() {
         </select>
         ${isFixer() ? `<label>Size</label><div class="chips" id="sizes">${SIZES.map((s) => `<button type="button" class="chip" data-s="${s.min}">${s.label}</button>`).join('')}</div>` : ''}
       </details>
-      <div style="margin-top:14px"><button class="btn primary block">Submit ticket</button></div>
+      <div style="margin-top:14px"><button class="btn primary block">Add Do</button></div>
     </form>
-    <p class="muted small center">Tip: one ticket per thing. Small, specific tickets get done faster.</p>`;
+    <p class="muted small center">Tip: one Do per thing. Small, specific Do’s get done faster.</p>`;
 
   const pick = (container, attr, onPick) => container?.querySelectorAll(`[data-${attr}]`).forEach((b) => {
     b.onclick = () => {
@@ -492,7 +492,7 @@ function viewNew() {
       };
       const r = await api('/tickets', { method: 'POST', body });
       state.tickets.unshift({ ...r.ticket, comment_count: 0 });
-      toast(`Ticket #${r.ticket.id} filed`);
+      toast(`Do #${r.ticket.id} added`);
       viewNew();
       tabsRefresh();
     } catch (er) {
@@ -517,7 +517,7 @@ function tabsRefresh() {
 function statsBlock() {
   const s = state.stats || {};
   return `<div class="stats">
-    <div class="stat"><b>${s.open || 0}</b><span>open tickets</span></div>
+    <div class="stat"><b>${s.open || 0}</b><span>open Do’s</span></div>
     <div class="stat"><b>${s.done_7d || 0}</b><span>done last 7 days</span></div>
     <div class="stat"><b>${s.done_30d || 0}</b><span>done last 30 days</span></div>
     <div class="stat"><b>${fmtMin(s.minutes_30d || 0)}</b><span>chore time, 30 days</span></div>
@@ -550,7 +550,7 @@ function capacityBlock(weekTickets) {
     <div class="row spread"><b>Capacity this week</b><span class="small">${fmtMin(planned + done)} of ${fmtMin(cap)} planned</span></div>
     <div class="capbar ${cls}"><div style="width:${pct}%"></div></div>
     <div class="small muted">${fmtMin(done)} done · ${fmtMin(planned)} to go${planned + done > cap ? ` · <b class="overdue">over by ${fmtMin(planned + done - cap)} — bump something to next week</b>` : ''}</div>
-    ${isFixer() ? '<div class="row" style="margin-top:8px"><button class="btn sm" id="autofill">⚡ Auto-fill from backlog</button><span class="muted small">Unsized tickets count as 30m.</span></div>' : ''}
+    ${isFixer() ? '<div class="row" style="margin-top:8px"><button class="btn sm" id="autofill">⚡ Auto-fill from backlog</button><span class="muted small">Unsized Do’s count as 30m.</span></div>' : ''}
   </div>`;
 }
 
@@ -572,7 +572,7 @@ function viewWeek() {
   app.innerHTML = `
     <h2>Week of ${wk}</h2>
     ${capacityBlock(weekTickets)}
-    ${p1Unplanned.length ? `<div class="card" style="border-color:var(--p1)"><b class="overdue">⚠ ${p1Unplanned.length} P1 ticket(s) not in this week's plan</b>
+    ${p1Unplanned.length ? `<div class="card" style="border-color:var(--p1)"><b class="overdue">⚠ ${p1Unplanned.length} P1 ${p1Unplanned.length === 1 ? 'Do' : 'Do’s'} not in this week's plan</b>
       ${p1Unplanned.map((t) => ticketCard(t, fx ? [['schedule', '+ Add to this week', 'primary']] : [])).join('')}</div>` : ''}
     ${inProg.length ? `<h3>In progress</h3>${inProg.map((t) => ticketCard(t, progActs)).join('')}` : ''}
     ${todo.length ? byDay(todo, todoActs) : `<h3>Planned</h3><p class="empty">Nothing planned yet.${fx ? ' Pull from Backlog or hit Auto-fill.' : ''}</p>`}
@@ -617,12 +617,12 @@ async function autoFill() {
     if (cost <= room) { picked.push(t); room -= cost; }
   }
   if (!picked.length) return toast(room <= 0 ? 'Week is already full' : 'Nothing in the backlog fits');
-  if (!confirm(`Add ${picked.length} ticket(s) to this week?\n\n${picked.map((t) => `• ${t.title} (${fmtMin(t.estimate_min || 30)})`).join('\n')}`)) return;
+  if (!confirm(`Add ${picked.length} ${picked.length === 1 ? 'Do' : 'Do’s'} to this week?\n\n${picked.map((t) => `• ${t.title} (${fmtMin(t.estimate_min || 30)})`).join('\n')}`)) return;
   for (const t of picked) {
     await api(`/tickets/${t.id}`, { method: 'PATCH', body: { status: 'scheduled', sprint_week: wk } });
   }
   await refresh();
-  toast(`Planned ${picked.length} ticket(s)`);
+  toast(`Planned ${picked.length} ${picked.length === 1 ? 'Do' : 'Do’s'}`);
   render();
 }
 
@@ -675,7 +675,7 @@ function viewBacklog() {
   const total = list.reduce((n, t) => n + (t.estimate_min || 30), 0);
 
   app.innerHTML = `
-    <h2>Backlog <span class="muted small">${list.length} tickets · ~${fmtMin(total)}</span></h2>
+    <h2>Backlog <span class="muted small">${list.length} ${list.length === 1 ? 'Do' : 'Do’s'} · ~${fmtMin(total)}</span></h2>
     <div class="chips" style="margin-bottom:12px" id="bf">
       ${[['all', 'All'], ['quick', '⚡ Quick wins ≤30m'], ['next', 'Next week'], ['unsized', 'Unsized'], ...CATEGORIES.map((c) => [c, CAT_ICON[c] + ' ' + c])]
         .map(([k, l]) => `<button class="chip ${f === k ? 'on' : ''}" data-f="${k}">${l}</button>`).join('')}
@@ -817,7 +817,7 @@ function viewVoice() {
   const secs = voice.recording ? Math.floor((Date.now() - voice.startedAt) / 1000) : 0;
   app.innerHTML = `
     <h2>${isFixer() ? 'Capture what was asked' : 'Just say it'}</h2>
-    <p class="muted small">Talk naturally — list as many things as you want. AI splits it into separate tickets with steps, sizes and a shopping list. You review before anything is filed.</p>
+    <p class="muted small">Talk naturally — list as many things as you want. AI splits it into separate Do’s with steps, sizes and a shopping list. You review before anything is filed.</p>
     <div class="card center">
       <button id="mic" class="mic ${voice.recording ? 'on' : ''}" aria-label="${voice.recording ? 'Stop recording' : 'Start recording'}">
         ${voice.recording ? '■' : '🎙'}
@@ -833,7 +833,7 @@ function viewVoice() {
     <p class="small" style="margin:6px 0 0"><button class="link small" id="teach">📖 Teach it a name or phrase</button> <span class="muted">· ${state.dictionary.length} known</span></p>
     ${isFixer() ? `<label>Who asked?</label><select id="reqr">${state.members.map((m) => `<option ${m.name === voice.requester ? 'selected' : ''}>${esc(m.name)}</option>`).join('')}</select>` : ''}
     <div class="row" style="margin-top:12px">
-      <button class="btn primary grow" id="parse" ${voice.busy ? 'disabled' : ''}>✨ Turn into tickets</button>
+      <button class="btn primary grow" id="parse" ${voice.busy ? 'disabled' : ''}>✨ Turn into Do’s</button>
       <button class="btn" id="clear">Clear</button>
     </div>`;
 
@@ -1095,13 +1095,13 @@ async function parseTranscript() {
   // Words she corrected by hand in the transcript → offer to remember them.
   voice.learn = voice.machine ? learnCorrections(voice.machine, typed) : [];
   voice.transcript = text;
-  voice.busy = '✨ Working out the to-dos…';
+  voice.busy = '✨ Working out the Do’s…';
   viewVoice();
   try {
     const r = await api('/parse', { method: 'POST', body: { text, tz: Intl.DateTimeFormat().resolvedOptions().timeZone } });
     r.items.forEach((it) => { it.keep = !it.duplicate_of; });
     voice.result = r;
-    if (!r.items.length) toast("Didn't find any to-dos in that");
+    if (!r.items.length) toast("Didn't find any Do’s in that");
   } catch (e) {
     toast(e.message);
   }
@@ -1124,7 +1124,7 @@ function viewVoiceReview() {
   const mins = items.filter((i) => i.keep).reduce((n, i) => n + i.estimate_min, 0);
   const titleOf = (id) => state.tickets.find((t) => t.id === id)?.title || '';
   app.innerHTML = `
-    <div class="row spread"><h2>${items.length} to-do${items.length === 1 ? '' : 's'} found</h2>
+    <div class="row spread"><h2>${items.length} ${items.length === 1 ? 'Do' : 'Do’s'} found</h2>
       <button class="link" id="back">← Edit transcript</button></div>
     <p class="muted small">Untick anything you don't want, tweak, then file. ${isFixer() ? `Filed as requested by <b>${esc(voice.requester)}</b>.` : ''}</p>
     ${(voice.learn || []).length ? `<div class="card learn"><b>📖 Remember your corrections?</b>
@@ -1156,8 +1156,8 @@ function viewVoiceReview() {
         ${it.source_quote ? `<div class="small muted" style="margin-top:6px">🗣 “${esc(it.source_quote)}”</div>` : ''}
       </div>`).join('')}
     </div>
-    ${notTasks.length ? `<details class="card"><summary class="muted small">Heard but not tickets (${notTasks.length})</summary><ul class="small">${notTasks.map((n) => `<li>${esc(n)}</li>`).join('')}</ul></details>` : ''}
-    <button class="btn primary block" id="file" ${kept ? '' : 'disabled'}>File ${kept} ticket${kept === 1 ? '' : 's'} · ~${fmtMin(mins)}</button>
+    ${notTasks.length ? `<details class="card"><summary class="muted small">Heard, but not Do’s (${notTasks.length})</summary><ul class="small">${notTasks.map((n) => `<li>${esc(n)}</li>`).join('')}</ul></details>` : ''}
+    <button class="btn primary block" id="file" ${kept ? '' : 'disabled'}>Add ${kept} ${kept === 1 ? 'Do' : 'Do’s'} · ~${fmtMin(mins)}</button>
     <button class="btn block" id="discard" style="margin-top:8px">Discard</button>`;
 
   $('#back').onclick = () => { voice.result = null; viewVoice(); };
@@ -1201,7 +1201,7 @@ function viewVoiceReview() {
         ok++;
       } catch (e) { toast(e.message); }
     }
-    toast(`Filed ${ok} ticket${ok === 1 ? '' : 's'} 🎉`);
+    toast(`Added ${ok} ${ok === 1 ? 'Do' : 'Do’s'} 🎉`);
     voice.result = null;
     voice.transcript = '';
     api('/stats').then((s) => { state.stats = s.stats; });
@@ -1352,11 +1352,11 @@ function viewRewards() {
       <div class="row spread hist">
         <span class="small">${h.kind === 'redeem' ? '🎁' : h.kind === 'ontime' ? '⏱' : h.kind === 'thanks' ? '✓' : '✅'} ${esc(h.title || h.note)}${h.kind === 'ontime' ? ' <span class="muted">(on time)</span>' : h.kind === 'thanks' ? ` <span class="muted">(${esc(h.note)})</span>` : ''}</span>
         <b class="${h.points > 0 ? 'gold' : 'muted'}">${h.points > 0 ? '+' : ''}${h.points}</b>
-      </div>`).join('')}</div>` : '<p class="empty">Finish a ticket to earn your first points! 💪</p>'}
+      </div>`).join('')}</div>` : '<p class="empty">Finish a Do to earn your first points! 💪</p>'}
     <details class="card small"><summary class="muted">How points work</summary>
       <p>Size: 15m = 10 · 30m = 20 · 1h = 35 · 3h = 80 · day = 180. P1 ×1.5, P2 ×1.25.<br>
       +25% if done on or before the scheduled day / due date. +10 when the requester approves ✓.<br>
-      Reopened tickets lose their points until they're really done.</p>
+      Reopened Do’s lose their points until they're really done.</p>
     </details>`;
 
   app.querySelectorAll('[data-redeem]').forEach((b) => {
@@ -1557,7 +1557,7 @@ function viewDictionary() {
         <input type="text" id="d-text" maxlength="80" placeholder="Dr. Saan" value="${esc(ed?.text || '')}" required>
         <label for="d-heard">Often misheard as <span class="muted">(comma-separated, optional)</span></label>
         <input type="text" id="d-heard" maxlength="400" placeholder="doctor sand, doctor son, dr sahn" value="${esc(ed?.heard.join(', ') || '')}">
-        <label for="d-means">Note <span class="muted">(optional, added to tickets)</span></label>
+        <label for="d-means">Note <span class="muted">(optional, added to the Do)</span></label>
         <input type="text" id="d-means" maxlength="300" placeholder="Emma's pediatrician · (555) 010-4477" value="${esc(ed?.means || '')}">
       ` : `
         <label for="d-text">When we say</label>
@@ -1581,7 +1581,7 @@ function viewDictionary() {
       <label for="d-test">Type something the way it might be transcribed</label>
       <input type="text" id="d-test" value="${esc(dictUi.test)}">
       <div class="small" id="d-out" style="margin-top:8px"></div>
-      <p class="muted small">Name fixes happen on the phone right away. Shorthand is expanded by Claude when you tap ✨ Turn into tickets.</p>
+      <p class="muted small">Name fixes happen on the phone right away. Shorthand is expanded by Claude when you tap ✨ Turn into Do’s.</p>
     </div>`;
 
   const showTest = () => {
@@ -1715,7 +1715,7 @@ async function openTicket(id) {
   const del = $('#del');
   if (del) {
     del.onclick = async () => {
-      if (!confirm('Delete this ticket permanently?')) return;
+      if (!confirm('Delete this Do permanently?')) return;
       await api(`/tickets/${t.id}`, { method: 'DELETE' });
       state.tickets = state.tickets.filter((x) => x.id !== t.id);
       modal.close();

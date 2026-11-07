@@ -67,7 +67,8 @@ The input is a raw speech-to-text transcript: expect run-on sentences, filler wo
 - Venting, general complaints, or information with no action belong in not_tasks, not items.
 - If something is too vague to act on, still make your best-guess ticket, and add one short clarifying question.
 - Use the household dictionary when one is given: write names exactly as spelled there, fix transcript words that match a listed mis-hearing (or clearly sound like a listed name in context), and expand household shorthand into what it means — a shorthand that means several jobs becomes several tickets. Put useful notes from the dictionary (who someone is, a phone number) in the description.
-Never invent requests that weren't said.`;
+Never invent requests that weren't said.
+The household calls these items "Do's" (one "Do"). In any text a person will read (questions, not_tasks, descriptions), say "Do" or "Do's", never "ticket".`;
 
 export async function onRequestPost({ request, env }) {
   if (!env.ANTHROPIC_API_KEY) {
