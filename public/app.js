@@ -3,7 +3,75 @@
 const $ = (sel, el = document) => el.querySelector(sel);
 const app = $('#app');
 const modal = $('#modal');
-const modalBody = $('#modal-body');
+const side = $('#side');
+const layout = $('#layout');
+
+// ---------- the "sheet": side pane on wide screens, pop-up dialog on phones ----------
+// Pixel Fold unfolded (~800px) and tablets get a list/detail layout: the Do list stays on
+// the left and details, updates and notifications open on the right. Folded phones keep
+// the pop-up dialog. In "book" posture the two panes line up with the hinge (CSS).
+const wideMQ = window.matchMedia('(min-width: 720px)');
+const LIST_VIEWS = ['week', 'triage', 'backlog', 'done', 'all', 'mine'];
+let modalBody = $('#modal-body'); // whichever container the sheet is currently drawing into
+const sideActive = () => wideMQ.matches && LIST_VIEWS.includes(state.tab);
+const inSide = () => modalBody === side;
+
+function sheetOpen(showing) {
+  if (sideActive()) {
+    if (modal.open) modal.close();
+    modalBody = side;
+    side.hidden = false;
+    layout.classList.add('has-side');
+    side.dataset.showing = showing || '';
+    side.scrollTop = 0;
+  } else {
+    modalBody = $('#modal-body');
+    if (!modal.open) modal.showModal();
+  }
+}
+function sheetClose() {
+  if (inSide()) {
+    state.selectedId = null;
+    markSelected();
+    showSideDefault();
+  } else {
+    modal.close();
+  }
+}
+// With nothing selected, the side pane shows the latest updates.
+function showSideDefault() {
+  if (sideActive()) openNotifications(true);
+}
+function syncSide() {
+  if (!sideActive()) {
+    side.hidden = true;
+    side.dataset.showing = '';
+    layout.classList.remove('has-side');
+    if (inSide()) modalBody = $('#modal-body');
+    return;
+  }
+  side.hidden = false;
+  layout.classList.add('has-side');
+  if (state.selectedId) {
+    if (side.dataset.showing !== `ticket:${state.selectedId}` && side.dataset.showing !== `update:${state.selectedId}`) openTicket(state.selectedId);
+  } else if (side.dataset.showing !== 'notifs') {
+    showSideDefault();
+  }
+  markSelected();
+}
+function markSelected() {
+  app.querySelectorAll('[data-open]').forEach((el) => {
+    el.classList.toggle('sel', inSide() && +el.dataset.open === state.selectedId);
+  });
+}
+// Folding / unfolding the phone moves an open Do between the pop-up and the side pane.
+wideMQ.addEventListener('change', () => {
+  if (!state.me) return;
+  const id = state.selectedId;
+  if (modal.open) modal.close();
+  render();
+  if (!sideActive() && id && inSide() === false) openTicket(id);
+});
 
 const PRIORITIES = {
   1: { label: 'P1 · Today', hint: 'Safety, leaks, broken essentials' },
@@ -40,6 +108,7 @@ const state = {
   lastNotifId: Number(localStorage.getItem('dd_last_notif') || 0),
   points: null,
   dictionary: [],
+  selectedId: null,
 };
 const HIDDEN_VIEWS = ['dict']; // reachable from Settings / Talk, not in the tab strip
 
@@ -195,6 +264,7 @@ async function refreshNotifs() {
     }
   }
   updateBell();
+  if (!side.contains(document.activeElement)) openNotifications.redraw?.();
 }
 
 async function systemNotify(n) {
@@ -226,6 +296,7 @@ async function patch(id, body, msg) {
     } else if (msg) toast(msg);
     api('/stats').then((s) => { state.stats = s.stats; });
     render();
+    if (inSide() && state.selectedId === id && side.dataset.showing === `ticket:${id}`) openTicket(id);
     return r.ticket;
   } catch (e) {
     toast(e.message);
@@ -360,6 +431,7 @@ function render() {
     dict: viewDictionary,
   };
   (views[state.tab] || viewNew)();
+  syncSide();
 }
 
 // ---------- ticket card ----------
@@ -818,6 +890,7 @@ function viewVoice() {
   app.innerHTML = `
     <h2>${isFixer() ? 'Capture what was asked' : 'Just say it'}</h2>
     <p class="muted small">Talk naturally — list as many things as you want. AI splits it into separate Do’s with steps, sizes and a shopping list. You review before anything is filed.</p>
+    <div class="talk-grid"><div class="talk-left">
     <div class="card center">
       <button id="mic" class="mic ${voice.recording ? 'on' : ''}" aria-label="${voice.recording ? 'Stop recording' : 'Start recording'}">
         ${voice.recording ? '■' : '🎙'}
@@ -828,6 +901,7 @@ function viewVoice() {
       </div>
       <div class="small muted" style="margin-top:4px">${sttPref() === 'browser' && SpeechRec ? '⚡ Phone speech (live)' : '🎯 Whisper large-v3 turbo · text appears after you stop'} · <button class="link small" id="stt-switch">change</button></div>
     </div>
+    </div><div class="talk-right">
     <label>Transcript <span class="muted">(edit anything it mis-heard — or type / use your keyboard's mic)</span></label>
     <textarea id="tx" rows="7" placeholder="e.g. &quot;The kitchen faucet is dripping again, and can you put the Christmas lights up before the party on the 14th, oh and the smoke detector in the hallway keeps chirping…&quot;">${esc(voice.transcript + (voice.interim ? ' ' + voice.interim : ''))}</textarea>
     <p class="small" style="margin:6px 0 0"><button class="link small" id="teach">📖 Teach it a name or phrase</button> <span class="muted">· ${state.dictionary.length} known</span></p>
@@ -835,7 +909,8 @@ function viewVoice() {
     <div class="row" style="margin-top:12px">
       <button class="btn primary grow" id="parse" ${voice.busy ? 'disabled' : ''}>✨ Turn into Do’s</button>
       <button class="btn" id="clear">Clear</button>
-    </div>`;
+    </div>
+    </div></div>`;
 
   $('#mic').onclick = () => (voice.recording ? stopRecording() : startRecording());
   $('#stt-switch').onclick = () => { if (!voice.recording) { state.tab = 'settings'; render(); } };
@@ -1256,7 +1331,7 @@ function openUpdate(t, presetStatus) {
       <label>Message for ${esc(t.requester)} <span class="muted">(optional)</span></label>
       <textarea id="un" rows="3" placeholder="${u.status === 'resolved' ? 'e.g. New washer in — no more drip!' : 'e.g. Picked up the part, doing it Saturday morning'}"></textarea>
       <button class="btn primary block" id="usend" style="margin-top:12px">Post update</button>`;
-    $('#uclose').onclick = () => modal.close();
+    $('#uclose').onclick = () => (inSide() ? openTicket(t.id) : sheetClose());
     $('#ust').querySelectorAll('[data-s]').forEach((b) => {
       b.onclick = () => { keepNote(); u.status = b.dataset.s; draw(); };
     });
@@ -1280,12 +1355,14 @@ function openUpdate(t, presetStatus) {
       if (u.status === 'scheduled' && !u.date && !t.sprint_week) body.sprint_week = THIS_WEEK();
     }
     if (u.status === 'blocked') body.blocked_reason = $('#ub').value.trim() || 'waiting';
-    if (Object.keys(body).length === 1 && !body.note) { modal.close(); return; }
+    if (Object.keys(body).length === 1 && !body.note) { if (inSide()) openTicket(t.id); else sheetClose(); return; }
     $('#usend').disabled = true;
     const r = await patch(t.id, body, `Update sent to ${t.requester} 🔔`);
-    if (r) modal.close(); else $('#usend').disabled = false;
+    if (r) { if (inSide()) openTicket(t.id); else sheetClose(); } else $('#usend').disabled = false;
   };
-  if (!modal.open) modal.showModal();
+  state.selectedId = t.id;
+  sheetOpen(`update:${t.id}`);
+  markSelected();
   draw();
 }
 
@@ -1327,6 +1404,7 @@ function viewRewards() {
       </div>`;
     }).join('')}
     <h3>Reward shop</h3>
+    <div class="shop">
     ${P.rewards.length ? P.rewards.map((r) => {
       const bal = myTotals().balance || 0;
       return `<div class="card row spread">
@@ -1337,6 +1415,7 @@ function viewRewards() {
         </div>
       </div>`;
     }).join('') : '<p class="empty">No rewards yet.</p>'}
+    </div>
     ${!me ? `<form id="rf" class="card">
       <b>Add a reward</b>
       <div class="row" style="margin-top:8px">
@@ -1397,11 +1476,13 @@ function viewRewards() {
 
 const NOTIF_ICON = { new: '🆕', status: '🔄', update: '💬', comment: '💬', scheduled: '📅', resolved: '✅', points: '⭐', reward: '🎉' };
 
-function openNotifications() {
+function openNotifications(asDefault = false) {
+  if (!asDefault && sideActive()) { state.selectedId = null; markSelected(); }
   const draw = () => {
+    const pane = inSide();
     modalBody.innerHTML = `
-      <div class="row spread"><b>🔔 Notifications</b>
-        <div class="row">${state.unread ? '<button class="btn sm" id="nall">Mark all read</button>' : ''}<button class="btn sm" id="nclose">✕</button></div></div>
+      <div class="row spread"><b>🔔 ${pane ? 'Latest updates' : 'Notifications'}</b>
+        <div class="row">${state.unread ? '<button class="btn sm" id="nall">Mark all read</button>' : ''}${pane ? '' : '<button class="btn sm" id="nclose">✕</button>'}</div></div>
       ${'Notification' in window && Notification.permission !== 'granted'
         ? '<button class="btn sm block" id="nperm" style="margin-top:10px">📲 Also buzz my phone for updates</button>' : ''}
       <div style="margin-top:10px">
@@ -1411,7 +1492,8 @@ function openNotifications() {
           <div class="grow"><div class="small">${esc(n.body)}</div><div class="muted small">${esc(n.actor)} · ${ago(n.created_at)}</div></div>
         </div>`).join('') : '<p class="empty">No notifications yet.</p>'}
       </div>`;
-    $('#nclose').onclick = () => modal.close();
+    const nc = $('#nclose');
+    if (nc) nc.onclick = () => sheetClose();
     const na = $('#nall');
     if (na) na.onclick = async () => {
       const r = await api('/notifications/read', { method: 'POST', body: {} });
@@ -1424,13 +1506,14 @@ function openNotifications() {
         const r = await api('/notifications/read', { method: 'POST', body: { ids: [+el.dataset.n] } });
         state.notifs = r.notifications; state.unread = r.unread; updateBell();
         if (el.dataset.t) openTicket(+el.dataset.t);
-        else if (/pts|reward|cashed/i.test(el.textContent)) { modal.close(); state.tab = 'rewards'; render(); }
+        else if (/pts|reward|cashed/i.test(el.textContent)) { if (modal.open) modal.close(); state.tab = 'rewards'; render(); }
         else draw();
       };
     });
   };
-  if (!modal.open) modal.showModal();
+  sheetOpen('notifs');
   draw();
+  openNotifications.redraw = () => { if (inSide() && side.dataset.showing === 'notifs') draw(); };
 }
 
 async function enableNotifications() {
@@ -1631,8 +1714,10 @@ function viewDictionary() {
 // ---------- ticket detail modal ----------
 
 async function openTicket(id) {
-  modalBody.innerHTML = '<p class="muted">Loading…</p>';
-  if (!modal.open) modal.showModal();
+  state.selectedId = id;
+  sheetOpen(`ticket:${id}`);
+  markSelected();
+  if (!inSide() || !modalBody.querySelector('#ef')) modalBody.innerHTML = '<p class="muted">Loading…</p>';
   let data;
   try { data = await api(`/tickets/${id}`); } catch (e) { modalBody.innerHTML = `<p>${esc(e.message)}</p>`; return; }
   const t = data.ticket;
@@ -1695,7 +1780,7 @@ async function openTicket(id) {
       <button class="btn">Send</button>
     </form>`;
 
-  $('#mclose').onclick = () => modal.close();
+  $('#mclose').onclick = () => sheetClose();
   const mu = $('#mupd');
   if (mu) mu.onclick = () => openUpdate(state.tickets.find((x) => x.id === t.id) || t);
   $('#ef').onsubmit = async (e) => {
@@ -1718,7 +1803,8 @@ async function openTicket(id) {
       if (!confirm('Delete this Do permanently?')) return;
       await api(`/tickets/${t.id}`, { method: 'DELETE' });
       state.tickets = state.tickets.filter((x) => x.id !== t.id);
-      modal.close();
+      state.selectedId = null;
+      if (modal.open) modal.close();
       toast('Deleted');
       render();
     };
@@ -1735,7 +1821,7 @@ async function openTicket(id) {
 }
 
 modal.addEventListener('click', (e) => { if (e.target === modal) modal.close(); });
-modal.addEventListener('close', () => render());
+modal.addEventListener('close', () => { if (!inSide()) state.selectedId = null; render(); });
 
 // Keep both phones in sync without websockets: refresh when the app regains focus and every minute.
 async function softRefresh() {

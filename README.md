@@ -35,6 +35,13 @@ She files ─► New ─► (you triage: size + priority) ─► Backlog ─► 
 
 **Weekly ritual (10 min, Sunday night):** open *This week*, hit **⚡ Auto-fill from backlog** (it fills by priority until your capacity runs out), and show her the plan. If something she wants isn't on it, the capacity bar makes the trade-off obvious: *"Sure, which one bumps to next week?"*
 
+## 📱 Phones, foldables and tablets
+
+- **Phone / Pixel Fold folded (< 720 px):** one column. Details, updates and notifications open as a pop-up.
+- **Pixel Fold unfolded, tablets, desktop (≥ 720 px):** the list screens (This week, Triage, Backlog, Done, My requests, Everything) show the list on the left and a **side pane** on the right. The pane shows **Latest updates** until you tap a Do, then its details and the 📝 update form. The selected Do is outlined. Talk, the review screen and the reward shop use two columns.
+- **Fold / unfold while a Do is open:** it moves between the pop-up and the side pane.
+- **Book posture (half-open, hinge vertical):** uses the Viewport Segments API (`horizontal-viewport-segments: 2`, `env(viewport-segment-*)`) to put the list on one half and the detail on the other, with the gap on the hinge.
+
 ## 📖 Household dictionary
 
 ⚙︎ Settings → **Household dictionary** (or **📖 Teach it a name or phrase** on the Talk screen). There are two kinds of entry:

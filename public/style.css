@@ -90,7 +90,13 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .tabs button.active { background: var(--accent); color: var(--accent-ink); }
 .tabs .badge { margin-left: 4px; }
 
-main { max-width: 760px; margin: 0 auto; padding: 16px; }
+/* Layout: one 760px column on phones; list + detail pane on wide screens (Pixel Fold, tablets). */
+.layout { max-width: 760px; margin: 0 auto; }
+main {
+  min-width: 0; padding-block: 16px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px));
+}
+#side { display: none; }
 h2 { font-size: 20px; margin: 4px 0 12px; }
 h3 { font-size: 15px; margin: 20px 0 8px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
 .muted { color: var(--muted); }
@@ -105,7 +111,7 @@ h3 { font-size: 15px; margin: 20px 0 8px; color: var(--muted); text-transform: u
   padding: 14px; margin-bottom: 10px;
 }
 
-input[type=text], input[type=password], input[type=number], input[type=date], select, textarea {
+input[type=text], input[type=password], input[type=number], input[type=date], input[type=time], select, textarea {
   width: 100%; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--line);
   background: var(--bg);
 }
@@ -179,7 +185,8 @@ dialog::backdrop { background: rgba(0,0,0,.45); }
 .comment { border-top: 1px solid var(--line); padding: 8px 0; font-size: 14px; }
 .comment.sys { color: var(--muted); font-size: 13px; }
 .comment .by { font-weight: 600; }
-.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0 10px; }
+.grid2 { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 0 10px; }
+.grid2 > *, .grid3 > * { min-width: 0; }
 @media (max-width: 480px) { .grid2 { grid-template-columns: 1fr; } }
 
 .toast {
@@ -249,3 +256,46 @@ dialog::backdrop { background: rgba(0,0,0,.45); }
 .learn { border-color: var(--accent); }
 .learn-row { padding: 6px 0; }
 .learn s { color: var(--muted); }
+
+/* ---------- wide screens: Pixel Fold unfolded, tablets, desktop ---------- */
+@media (min-width: 720px) {
+  .layout { max-width: 980px; }
+  .layout.has-side {
+    max-width: 1320px;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(320px, 0.9fr);
+    align-items: start;
+  }
+  .layout.has-side main { padding-right: 8px; }
+  .layout.has-side #side {
+    display: block;
+    position: sticky; top: calc(env(safe-area-inset-top, 0px) + 112px);
+    max-height: calc(100dvh - 128px - env(safe-area-inset-top, 0px));
+    overflow-y: auto; overscroll-behavior: contain;
+    margin: 16px max(16px, env(safe-area-inset-right, 0px)) 16px 8px;
+    padding: 18px; background: var(--card); border: 1px solid var(--line); border-radius: 16px;
+  }
+  #side .big-input { font-size: 17px; }
+  .ticket.sel { outline: 2px solid var(--accent); outline-offset: -1px; }
+
+  /* Talk: mic on the left, transcript on the right */
+  .talk-grid { display: grid; grid-template-columns: minmax(260px, 0.8fr) minmax(0, 1.2fr); gap: 16px; align-items: start; }
+  .talk-grid > * { min-width: 0; }
+  .talk-grid .card { margin: 0; }
+  /* Review proposals, reward shop, stats: two columns */
+  #props, .shop { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; align-items: start; }
+  #props > .card, .shop > .card { margin: 0; }
+  .tabs { justify-content: center; }
+}
+
+/* Book posture: the fold's hinge runs top-to-bottom. Put the list on the left screen half and the
+   detail on the right, with the gap exactly where the hinge is (Viewport Segments API). */
+@media (horizontal-viewport-segments: 2) {
+  .layout.has-side {
+    max-width: none;
+    grid-template-columns: env(viewport-segment-width 0 0) env(viewport-segment-width 1 0);
+    column-gap: calc(env(viewport-segment-left 1 0) - env(viewport-segment-right 0 0));
+  }
+  .layout.has-side #side { margin-left: 16px; }
+  .layout.has-side main { padding-right: 16px; }
+}
