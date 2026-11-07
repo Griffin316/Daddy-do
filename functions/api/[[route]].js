@@ -100,13 +100,20 @@ async function createTicket(db, request, actor) {
     assignee: clean('assignee', body.assignee ?? ''),
     recur_days: clean('recur_days', body.recur_days ?? 0),
   };
+  // Allow filing on behalf of another household member (e.g. Dad captures what Mom asked for).
+  let requester = actor;
+  if (body.requester) {
+    const s = await db.prepare("SELECT value FROM settings WHERE key = 'members'").first();
+    const names = JSON.parse(s?.value || '[]').map((m) => m.name);
+    if (names.includes(String(body.requester))) requester = String(body.requester);
+  }
   const row = await db.prepare(
     `INSERT INTO tickets (title, description, requester, priority, category, location, due_date,
                           estimate_min, assignee, recur_days)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *`,
-  ).bind(t.title, t.description, actor, t.priority, t.category, t.location, t.due_date,
+  ).bind(t.title, t.description, requester, t.priority, t.category, t.location, t.due_date,
     t.estimate_min, t.assignee, t.recur_days).first();
-  await audit(db, row.id, actor, 'Opened ticket');
+  await audit(db, row.id, actor, requester === actor ? 'Opened ticket' : `Opened ticket on behalf of ${requester}`);
   return json({ ticket: row }, 201);
 }
 

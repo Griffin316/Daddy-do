@@ -160,3 +160,20 @@ dialog::backdrop { background: rgba(0,0,0,.45); }
   box-shadow: 0 6px 20px rgba(0,0,0,.25); max-width: calc(100vw - 32px);
 }
 .empty { text-align: center; color: var(--muted); padding: 30px 10px; }
+
+/* voice capture */
+.mic {
+  width: 96px; height: 96px; border-radius: 50%; border: 0; cursor: pointer;
+  background: var(--accent); color: #fff; font-size: 40px; box-shadow: 0 6px 20px rgba(37,99,235,.35);
+}
+.mic.on { background: var(--p1); animation: pulse 1.4s infinite; font-size: 32px; }
+@keyframes pulse {
+  0% { box-shadow: 0 0 0 0 rgba(220,38,38,.5); }
+  70% { box-shadow: 0 0 0 22px rgba(220,38,38,0); }
+  100% { box-shadow: 0 0 0 0 rgba(220,38,38,0); }
+}
+.grid3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin-top: 8px; }
+.grid3 select { padding: 8px; font-size: 13px; }
+@media (max-width: 420px) { .grid3 { grid-template-columns: 1fr 1fr; } }
+.ticket.off { opacity: .45; }
+.steps { margin: 8px 0 4px; padding-left: 20px; }

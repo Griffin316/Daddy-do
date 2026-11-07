@@ -225,6 +225,7 @@ function tabsFor() {
     return [
       ['week', 'This week', week],
       ['triage', 'Triage', untriaged, true],
+      ['talk', '🎙 Talk'],
       ['backlog', 'Backlog', open.filter((t) => t.status !== 'new' && t.sprint_week !== THIS_WEEK()).length],
       ['new', '+ New'],
       ['done', 'Done'],
@@ -232,7 +233,8 @@ function tabsFor() {
     ];
   }
   return [
-    ['new', '+ Ask'],
+    ['talk', '🎙 Talk'],
+    ['new', '+ Type it'],
     ['mine', 'My requests', toVerify, toVerify > 0],
     ['week', "This week's plan", week],
     ['all', 'Everything'],
@@ -257,7 +259,7 @@ function render() {
   });
 
   const views = {
-    new: viewNew, mine: viewMine, week: viewWeek, triage: viewTriage,
+    talk: viewVoice, new: viewNew, mine: viewMine, week: viewWeek, triage: viewTriage,
     backlog: viewBacklog, done: viewDone, all: viewAll, settings: viewSettings,
   };
   (views[state.tab] || viewNew)();
@@ -637,6 +639,267 @@ function memberRow(m) {
   </div>`;
 }
 
+// ---------- voice brain-dump: speech → transcript → AI → reviewable tickets ----------
+
+const voice = {
+  transcript: '',
+  interim: '',
+  recording: false,
+  engine: null, // 'speech' (browser) | 'server' (record + Whisper)
+  rec: null,
+  mediaRec: null,
+  chunks: [],
+  startedAt: 0,
+  timer: null,
+  busy: '',
+  result: null, // { items, questions, not_tasks }
+  requester: '',
+};
+
+const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
+
+function viewVoice() {
+  if (!voice.requester) voice.requester = isFixer() ? (state.members.find((m) => m.role === 'requester')?.name || state.me) : state.me;
+  if (voice.result) return viewVoiceReview();
+  const secs = voice.recording ? Math.floor((Date.now() - voice.startedAt) / 1000) : 0;
+  app.innerHTML = `
+    <h2>${isFixer() ? 'Capture what was asked' : 'Just say it'}</h2>
+    <p class="muted small">Talk naturally — list as many things as you want. AI splits it into separate tickets with steps, sizes and a shopping list. You review before anything is filed.</p>
+    <div class="card center">
+      <button id="mic" class="mic ${voice.recording ? 'on' : ''}" aria-label="${voice.recording ? 'Stop recording' : 'Start recording'}">
+        ${voice.recording ? '■' : '🎙'}
+      </button>
+      <div class="small muted" id="mic-status" style="margin-top:8px">
+        ${voice.recording ? `Listening… ${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, '0')} — tap to stop` : voice.busy || 'Tap to talk'}
+      </div>
+    </div>
+    <label>Transcript <span class="muted">(edit anything it mis-heard — or type / use your keyboard's mic)</span></label>
+    <textarea id="tx" rows="7" placeholder="e.g. &quot;The kitchen faucet is dripping again, and can you put the Christmas lights up before the party on the 14th, oh and the smoke detector in the hallway keeps chirping…&quot;">${esc(voice.transcript + (voice.interim ? ' ' + voice.interim : ''))}</textarea>
+    ${isFixer() ? `<label>Who asked?</label><select id="reqr">${state.members.map((m) => `<option ${m.name === voice.requester ? 'selected' : ''}>${esc(m.name)}</option>`).join('')}</select>` : ''}
+    <div class="row" style="margin-top:12px">
+      <button class="btn primary grow" id="parse" ${voice.busy ? 'disabled' : ''}>✨ Turn into tickets</button>
+      <button class="btn" id="clear">Clear</button>
+    </div>`;
+
+  $('#mic').onclick = () => (voice.recording ? stopRecording() : startRecording());
+  $('#tx').oninput = (e) => { voice.transcript = e.target.value; voice.interim = ''; };
+  const rq = $('#reqr');
+  if (rq) rq.onchange = (e) => { voice.requester = e.target.value; };
+  $('#clear').onclick = () => { voice.transcript = ''; voice.interim = ''; viewVoice(); };
+  $('#parse').onclick = parseTranscript;
+}
+
+function setMicStatus(text) {
+  const el = $('#mic-status');
+  if (el) el.textContent = text;
+}
+function syncTranscriptBox() {
+  const tx = $('#tx');
+  if (tx) tx.value = (voice.transcript + (voice.interim ? ' ' + voice.interim : '')).trim();
+}
+
+async function startRecording() {
+  voice.recording = true;
+  voice.startedAt = Date.now();
+  voice.engine = SpeechRec && !voice.forceServer ? 'speech' : 'server';
+  try {
+    if (voice.engine === 'speech') startSpeechRecognition();
+    else await startMediaRecorder();
+  } catch (e) {
+    voice.recording = false;
+    toast(e.message || 'Microphone unavailable');
+  }
+  viewVoice();
+  clearInterval(voice.timer);
+  voice.timer = setInterval(() => {
+    if (!voice.recording) return clearInterval(voice.timer);
+    const s = Math.floor((Date.now() - voice.startedAt) / 1000);
+    setMicStatus(`Listening… ${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')} — tap to stop`);
+  }, 500);
+}
+
+function startSpeechRecognition() {
+  const rec = new SpeechRec();
+  rec.lang = navigator.language || 'en-US';
+  rec.continuous = true;
+  rec.interimResults = true;
+  rec.onresult = (ev) => {
+    let interim = '';
+    for (let i = ev.resultIndex; i < ev.results.length; i++) {
+      const r = ev.results[i];
+      if (r.isFinal) voice.transcript = (voice.transcript + ' ' + r[0].transcript.trim()).trim();
+      else interim += r[0].transcript;
+    }
+    voice.interim = interim.trim();
+    syncTranscriptBox();
+  };
+  rec.onerror = async (ev) => {
+    if (ev.error === 'no-speech' || ev.error === 'aborted') return;
+    // Browser speech service unavailable (common in iOS home-screen apps) → record + server Whisper.
+    if (voice.recording && ['not-allowed', 'service-not-allowed', 'network', 'audio-capture'].includes(ev.error)) {
+      voice.forceServer = true;
+      voice.rec = null;
+      if (ev.error === 'not-allowed') { voice.recording = false; toast('Microphone permission denied'); viewVoice(); return; }
+      try { voice.engine = 'server'; await startMediaRecorder(); toast('Using server transcription'); } catch (e) { voice.recording = false; toast(e.message); viewVoice(); }
+    }
+  };
+  // Mobile browsers end sessions after a pause — keep listening until the user taps stop.
+  rec.onend = () => {
+    if (voice.recording && voice.engine === 'speech') {
+      try { rec.start(); } catch { /* already started */ }
+    }
+  };
+  rec.start();
+  voice.rec = rec;
+}
+
+async function startMediaRecorder() {
+  if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder) {
+    throw new Error('This browser cannot record audio — use your keyboard mic instead.');
+  }
+  const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  const type = ['audio/webm;codecs=opus', 'audio/mp4', 'audio/webm', 'audio/ogg'].find((t) => MediaRecorder.isTypeSupported?.(t)) || '';
+  const mr = new MediaRecorder(stream, type ? { mimeType: type } : undefined);
+  voice.chunks = [];
+  mr.ondataavailable = (e) => { if (e.data.size) voice.chunks.push(e.data); };
+  mr.onstop = async () => {
+    stream.getTracks().forEach((t) => t.stop());
+    const blob = new Blob(voice.chunks, { type: mr.mimeType || 'audio/webm' });
+    if (!blob.size) return;
+    voice.busy = 'Transcribing…';
+    viewVoice();
+    try {
+      const res = await fetch('/api/transcribe', {
+        method: 'POST', body: blob, credentials: 'same-origin',
+        headers: { 'content-type': blob.type, 'x-user': encodeURIComponent(state.me) },
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+      voice.transcript = (voice.transcript + ' ' + data.text).trim();
+    } catch (e) {
+      toast(e.message);
+    }
+    voice.busy = '';
+    viewVoice();
+  };
+  mr.start(1000);
+  voice.mediaRec = mr;
+}
+
+function stopRecording() {
+  voice.recording = false;
+  clearInterval(voice.timer);
+  if (voice.rec) { try { voice.rec.stop(); } catch { /* ignore */ } voice.rec = null; }
+  if (voice.mediaRec && voice.mediaRec.state !== 'inactive') voice.mediaRec.stop();
+  voice.mediaRec = null;
+  if (voice.interim) { voice.transcript = (voice.transcript + ' ' + voice.interim).trim(); voice.interim = ''; }
+  viewVoice();
+}
+
+async function parseTranscript() {
+  if (voice.recording) stopRecording();
+  const text = ($('#tx')?.value || voice.transcript).trim();
+  voice.transcript = text;
+  if (!text) return toast('Say or type something first');
+  voice.busy = '✨ Working out the to-dos…';
+  viewVoice();
+  try {
+    const r = await api('/parse', { method: 'POST', body: { text, tz: Intl.DateTimeFormat().resolvedOptions().timeZone } });
+    r.items.forEach((it) => { it.keep = !it.duplicate_of; });
+    voice.result = r;
+    if (!r.items.length) toast("Didn't find any to-dos in that");
+  } catch (e) {
+    toast(e.message);
+  }
+  voice.busy = '';
+  viewVoice();
+}
+
+function buildDescription(it) {
+  const parts = [];
+  if (it.description) parts.push(it.description);
+  if (it.steps.length) parts.push('Steps:\n' + it.steps.map((s) => `☐ ${s}`).join('\n'));
+  if (it.shopping.length) parts.push('🛒 Need: ' + it.shopping.join(', '));
+  if (it.source_quote) parts.push(`🗣 “${it.source_quote}”`);
+  return parts.join('\n\n');
+}
+
+function viewVoiceReview() {
+  const { items, questions, not_tasks: notTasks } = voice.result;
+  const kept = items.filter((i) => i.keep).length;
+  const mins = items.filter((i) => i.keep).reduce((n, i) => n + i.estimate_min, 0);
+  const titleOf = (id) => state.tickets.find((t) => t.id === id)?.title || '';
+  app.innerHTML = `
+    <div class="row spread"><h2>${items.length} to-do${items.length === 1 ? '' : 's'} found</h2>
+      <button class="link" id="back">← Edit transcript</button></div>
+    <p class="muted small">Untick anything you don't want, tweak, then file. ${isFixer() ? `Filed as requested by <b>${esc(voice.requester)}</b>.` : ''}</p>
+    ${questions.length ? `<div class="card" style="border-color:var(--warn)"><b>🤔 Worth clarifying</b><ul class="small">${questions.map((q) => `<li>${esc(q)}</li>`).join('')}</ul></div>` : ''}
+    <div id="props">
+    ${items.map((it, i) => `
+      <div class="card ticket p${it.priority} ${it.keep ? '' : 'off'}" data-i="${i}">
+        <div class="row">
+          <input type="checkbox" class="keep" ${it.keep ? 'checked' : ''} style="width:20px;height:20px">
+          <input type="text" class="t grow" value="${esc(it.title)}" style="flex:1;width:auto;font-weight:600">
+        </div>
+        ${it.duplicate_of ? `<div class="small" style="margin-top:6px;color:var(--warn)">⚠ Looks like existing #${it.duplicate_of}: ${esc(titleOf(it.duplicate_of))} — unticked</div>` : ''}
+        <div class="grid3">
+          <select class="p">${[1, 2, 3, 4].map((p) => `<option value="${p}" ${it.priority === p ? 'selected' : ''}>${PRIORITIES[p].label}</option>`).join('')}</select>
+          <select class="s">${SIZES.map((s) => `<option value="${s.min}" ${it.estimate_min === s.min ? 'selected' : ''}>${s.label}</option>`).join('')}</select>
+          <select class="c">${CATEGORIES.map((c) => `<option ${it.category === c ? 'selected' : ''}>${c}</option>`).join('')}</select>
+        </div>
+        <div class="meta">
+          ${it.location ? `<span>📍 ${esc(it.location)}</span>` : ''}
+          ${it.due_date ? `<span>⏰ by ${esc(it.due_date)}</span>` : ''}
+          ${it.recur_days ? `<span>🔁 every ${it.recur_days}d</span>` : ''}
+        </div>
+        ${it.steps.length ? `<ol class="small steps">${it.steps.map((s) => `<li>${esc(s)}</li>`).join('')}</ol>` : ''}
+        ${it.shopping.length ? `<div class="small">🛒 ${it.shopping.map(esc).join(' · ')}</div>` : ''}
+        ${it.source_quote ? `<div class="small muted" style="margin-top:6px">🗣 “${esc(it.source_quote)}”</div>` : ''}
+      </div>`).join('')}
+    </div>
+    ${notTasks.length ? `<details class="card"><summary class="muted small">Heard but not tickets (${notTasks.length})</summary><ul class="small">${notTasks.map((n) => `<li>${esc(n)}</li>`).join('')}</ul></details>` : ''}
+    <button class="btn primary block" id="file" ${kept ? '' : 'disabled'}>File ${kept} ticket${kept === 1 ? '' : 's'} · ~${fmtMin(mins)}</button>
+    <button class="btn block" id="discard" style="margin-top:8px">Discard</button>`;
+
+  $('#back').onclick = () => { voice.result = null; viewVoice(); };
+  $('#discard').onclick = () => { voice.result = null; voice.transcript = ''; viewVoice(); };
+  $('#props').querySelectorAll('[data-i]').forEach((card) => {
+    const it = items[+card.dataset.i];
+    card.querySelector('.keep').onchange = (e) => { it.keep = e.target.checked; viewVoiceReview(); };
+    card.querySelector('.t').oninput = (e) => { it.title = e.target.value; };
+    card.querySelector('.p').onchange = (e) => { it.priority = +e.target.value; viewVoiceReview(); };
+    card.querySelector('.s').onchange = (e) => { it.estimate_min = +e.target.value; viewVoiceReview(); };
+    card.querySelector('.c').onchange = (e) => { it.category = e.target.value; };
+  });
+  $('#file').onclick = async () => {
+    const btn = $('#file');
+    btn.disabled = true;
+    const toFile = items.filter((i) => i.keep && i.title.trim());
+    let ok = 0;
+    for (const it of toFile) {
+      btn.textContent = `Filing ${ok + 1}/${toFile.length}…`;
+      try {
+        const r = await api('/tickets', {
+          method: 'POST',
+          body: {
+            title: it.title, description: buildDescription(it), priority: it.priority,
+            category: it.category, location: it.location, due_date: it.due_date,
+            estimate_min: it.estimate_min, recur_days: it.recur_days, requester: voice.requester,
+          },
+        });
+        state.tickets.unshift({ ...r.ticket, comment_count: 0 });
+        ok++;
+      } catch (e) { toast(e.message); }
+    }
+    toast(`Filed ${ok} ticket${ok === 1 ? '' : 's'} 🎉`);
+    voice.result = null;
+    voice.transcript = '';
+    api('/stats').then((s) => { state.stats = s.stats; });
+    state.tab = isFixer() ? 'triage' : 'mine';
+    render();
+  };
+}
+
 // ---------- ticket detail modal ----------
 
 async function openTicket(id) {
@@ -732,7 +995,7 @@ modal.addEventListener('close', () => render());
 
 // Keep both phones in sync without websockets: refresh when the app regains focus and every minute.
 async function softRefresh() {
-  if (!state.me || modal.open || document.activeElement?.matches('input, textarea')) return;
+  if (!state.me || modal.open || state.tab === 'talk' || document.activeElement?.matches('input, textarea')) return;
   try { await refresh(); render(); } catch { /* ignore */ }
 }
 document.addEventListener('visibilitychange', () => { if (!document.hidden) softRefresh(); });
