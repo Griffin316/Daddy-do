@@ -55,7 +55,12 @@ The 🏆 tab shows Dad's balance, his level (Apprentice → Handy → Fix-it Pro
 ## 🎙 Voice brain-dump
 
 1. Tap the mic and talk, e.g. *"the kitchen faucet's dripping again, the smoke detector in the hall keeps chirping, and can you get the Christmas lights up before the party on the 14th"*.
-2. **Speech-to-text:** the browser transcribes live and free using the Web Speech API in Chrome, Edge and Safari. Where that isn't available (iPhone home-screen app, Firefox), the app records audio and transcribes it with **Workers AI Whisper** (`/api/transcribe`). You can also edit the transcript or use the keyboard's mic.
+2. **Speech-to-text (default: Whisper):** the phone records and converts the audio to 16 kHz mono WAV, which is Whisper's native format. Long recordings are split at natural pauses into chunks of about 90 seconds. Each chunk goes to **Cloudflare Workers AI `whisper-large-v3-turbo`** (`/api/transcribe`) along with:
+   - a **vocabulary hint**: household names, rooms and brands from ⚙︎ Settings, plus the titles of open tickets;
+   - the **end of the previous chunk's text**, so sentences carry over between chunks;
+   - **voice-activity filtering** and anti-hallucination settings.
+
+   A level meter shows it's hearing you. Text appears a few seconds after you stop. Each phone can switch to ⚡ *Phone speech* (live but less accurate) in Settings. Cost: about $0.0005 per audio minute, with roughly 214 free minutes a day.
 3. **✨ Turn into tickets:** `/api/parse` sends the transcript to **Claude** with a strict JSON schema. Claude splits it into one ticket per job and writes each as an action ("Replace smoke detector battery in hallway"). It sets priority (safety issues become P1), estimates the size, works out dates like "by Friday", lists steps and parts, flags duplicates of open tickets, and leaves out venting.
 4. **Review** the proposed tickets. You can untick, retitle, or change priority, size and category. Then file them all in one tap. When Dad uses voice, he can file on her behalf ("Who asked?"), so she still gets the final ✓ when it's done.
 

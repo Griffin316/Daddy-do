@@ -454,6 +454,7 @@ async function getSettings(db) {
   return json({
     members: JSON.parse(s.members || '[]'),
     capacity_min: Number(s.capacity_min || 240),
+    vocab: s.vocab || '',
   });
 }
 
@@ -472,6 +473,11 @@ async function putSettings(db, request) {
     const n = Math.max(0, Math.min(10080, Math.round(Number(body.capacity_min) || 0)));
     stmts.push(db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)')
       .bind('capacity_min', String(n)));
+  }
+  if (body.vocab !== undefined) {
+    // Household words for speech recognition: names, rooms, brands, pets...
+    stmts.push(db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)')
+      .bind('vocab', String(body.vocab).slice(0, 500)));
   }
   if (stmts.length) await db.batch(stmts);
   return getSettings(db);

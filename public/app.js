@@ -239,6 +239,7 @@ async function boot() {
     const settings = await api('/settings');
     state.members = settings.members;
     state.capacity = settings.capacity_min;
+    state.vocab = settings.vocab || '';
     if (!state.members.some((m) => m.name === state.me)) return renderWhoAmI();
     await refresh();
     render();
@@ -720,8 +721,19 @@ function viewSettings() {
       <label style="margin-top:16px">Hours available for chores per week</label>
       <input type="number" name="cap" min="0" max="168" step="0.5" value="${state.capacity / 60}">
       <p class="muted small">Be honest — this is what "This week" plans against. Over-capacity shows red so you can negotiate what slips.</p>
+      <label for="vocab" style="margin-top:16px">Words the voice transcriber should know</label>
+      <textarea id="vocab" name="vocab" rows="3" maxlength="500" placeholder="Kids' and pets' names, rooms, brands: Emma, Biscuit, mudroom, Moen, MERV 11, Ring doorbell, Trex deck">${esc(state.vocab || '')}</textarea>
+      <p class="muted small">Whisper uses these, plus your open ticket titles, to spell things right. Shared by everyone in the house.</p>
       <button class="btn primary block" style="margin-top:12px">Save</button>
     </form>
+    <div class="card">
+      <b>Speech recognition on this phone</b>
+      <div class="chips" id="stt" style="margin-top:8px">
+        <button type="button" class="chip ${sttPref() === 'whisper' ? 'on' : ''}" data-stt="whisper">🎯 Whisper (most accurate)</button>
+        <button type="button" class="chip ${sttPref() === 'browser' ? 'on' : ''}" data-stt="browser" ${SpeechRec ? '' : 'disabled'}>⚡ Phone (live, instant)</button>
+      </div>
+      <p class="muted small">Whisper large-v3 turbo on Cloudflare: text appears a few seconds after you stop. Phone speech shows words as you talk but makes more mistakes.</p>
+    </div>
     <div class="card">
       <b>Phone notifications</b>
       <p class="muted small">Get a buzz on this phone when there's an update, even when the app is in the background.</p>
@@ -743,15 +755,19 @@ function viewSettings() {
     })).filter((m) => m.name);
     try {
       const old = state.me;
-      const r = await api('/settings', { method: 'PUT', body: { members, capacity_min: Math.round(+e.target.cap.value * 60) } });
+      const r = await api('/settings', { method: 'PUT', body: { members, capacity_min: Math.round(+e.target.cap.value * 60), vocab: e.target.vocab.value } });
       state.members = r.members;
       state.capacity = r.capacity_min;
+      state.vocab = r.vocab || '';
       toast('Saved');
       if (!state.members.some((m) => m.name === old)) return renderWhoAmI();
       render();
     } catch (er) { toast(er.message); }
   };
   $('#notif-on').onclick = enableNotifications;
+  $('#stt').querySelectorAll('[data-stt]').forEach((b) => {
+    b.onclick = () => { localStorage.setItem('dd_stt', b.dataset.stt); toast(b.dataset.stt === 'whisper' ? 'Using Whisper' : 'Using phone speech'); viewSettings(); };
+  });
   $('#install').onclick = async () => { if (installPrompt) { installPrompt.prompt(); installPrompt = null; } };
   $('#logout').onclick = async () => { await api('/logout', { method: 'POST' }).catch(() => {}); renderLogin(); };
 }
@@ -785,6 +801,8 @@ const voice = {
 };
 
 const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
+// Per-phone choice: 'whisper' (record → Cloudflare Whisper, most accurate) or 'browser' (live, phone's own engine).
+const sttPref = () => localStorage.getItem('dd_stt') || 'whisper';
 
 function viewVoice() {
   if (!voice.requester) voice.requester = isFixer() ? (state.members.find((m) => m.role === 'requester')?.name || state.me) : state.me;
@@ -797,9 +815,11 @@ function viewVoice() {
       <button id="mic" class="mic ${voice.recording ? 'on' : ''}" aria-label="${voice.recording ? 'Stop recording' : 'Start recording'}">
         ${voice.recording ? '■' : '🎙'}
       </button>
+      <div class="lvl" id="lvl" ${voice.recording && voice.engine === 'server' ? '' : 'hidden'}><div></div></div>
       <div class="small muted" id="mic-status" style="margin-top:8px">
         ${voice.recording ? `Listening… ${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, '0')} — tap to stop` : voice.busy || 'Tap to talk'}
       </div>
+      <div class="small muted" style="margin-top:4px">${sttPref() === 'browser' && SpeechRec ? '⚡ Phone speech (live)' : '🎯 Whisper large-v3 turbo · text appears after you stop'} · <button class="link small" id="stt-switch">change</button></div>
     </div>
     <label>Transcript <span class="muted">(edit anything it mis-heard — or type / use your keyboard's mic)</span></label>
     <textarea id="tx" rows="7" placeholder="e.g. &quot;The kitchen faucet is dripping again, and can you put the Christmas lights up before the party on the 14th, oh and the smoke detector in the hallway keeps chirping…&quot;">${esc(voice.transcript + (voice.interim ? ' ' + voice.interim : ''))}</textarea>
@@ -810,6 +830,7 @@ function viewVoice() {
     </div>`;
 
   $('#mic').onclick = () => (voice.recording ? stopRecording() : startRecording());
+  $('#stt-switch').onclick = () => { if (!voice.recording) { state.tab = 'settings'; render(); } };
   $('#tx').oninput = (e) => { voice.transcript = e.target.value; voice.interim = ''; };
   const rq = $('#reqr');
   if (rq) rq.onchange = (e) => { voice.requester = e.target.value; };
@@ -829,7 +850,7 @@ function syncTranscriptBox() {
 async function startRecording() {
   voice.recording = true;
   voice.startedAt = Date.now();
-  voice.engine = SpeechRec && !voice.forceServer ? 'speech' : 'server';
+  voice.engine = sttPref() === 'browser' && SpeechRec && !voice.forceServer ? 'speech' : 'server';
   try {
     if (voice.engine === 'speech') startSpeechRecognition();
     else await startMediaRecorder();
@@ -885,25 +906,25 @@ async function startMediaRecorder() {
   if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder) {
     throw new Error('This browser cannot record audio — use your keyboard mic instead.');
   }
-  const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  const stream = await navigator.mediaDevices.getUserMedia({
+    audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+  });
   const type = ['audio/webm;codecs=opus', 'audio/mp4', 'audio/webm', 'audio/ogg'].find((t) => MediaRecorder.isTypeSupported?.(t)) || '';
-  const mr = new MediaRecorder(stream, type ? { mimeType: type } : undefined);
+  const mr = new MediaRecorder(stream, type ? { mimeType: type, audioBitsPerSecond: 64000 } : undefined);
   voice.chunks = [];
   mr.ondataavailable = (e) => { if (e.data.size) voice.chunks.push(e.data); };
+  const stopMeter = startLevelMeter(stream);
   mr.onstop = async () => {
+    stopMeter();
     stream.getTracks().forEach((t) => t.stop());
     const blob = new Blob(voice.chunks, { type: mr.mimeType || 'audio/webm' });
     if (!blob.size) return;
-    voice.busy = 'Transcribing…';
+    voice.busy = '🎯 Transcribing with Whisper…';
     viewVoice();
     try {
-      const res = await fetch('/api/transcribe', {
-        method: 'POST', body: blob, credentials: 'same-origin',
-        headers: { 'content-type': blob.type, 'x-user': encodeURIComponent(state.me) },
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
-      voice.transcript = (voice.transcript + ' ' + data.text).trim();
+      const text = await transcribeRecording(blob);
+      if (text) voice.transcript = (voice.transcript + ' ' + text).trim();
+      else toast("Didn't catch any speech — try again a little closer to the phone");
     } catch (e) {
       toast(e.message);
     }
@@ -912,6 +933,127 @@ async function startMediaRecorder() {
   };
   mr.start(1000);
   voice.mediaRec = mr;
+}
+
+// Live input level so she can see it's hearing her (Whisper text only arrives after stopping).
+function startLevelMeter(stream) {
+  let ctx; let raf = 0;
+  try {
+    ctx = new (window.AudioContext || window.webkitAudioContext)();
+    ctx.resume?.().catch(() => {}); // created after an await, so Chrome may start it suspended
+    const an = ctx.createAnalyser();
+    an.fftSize = 512;
+    ctx.createMediaStreamSource(stream).connect(an);
+    const buf = new Float32Array(an.fftSize);
+    const tick = () => {
+      an.getFloatTimeDomainData(buf);
+      let sum = 0;
+      for (const v of buf) sum += v * v;
+      const level = Math.min(1, Math.sqrt(sum / buf.length) * 6);
+      const bar = $('#lvl > div');
+      if (bar) bar.style.width = `${Math.round(level * 100)}%`;
+      raf = requestAnimationFrame(tick);
+    };
+    tick();
+  } catch { /* meter is optional */ }
+  return () => { cancelAnimationFrame(raf); try { ctx?.close(); } catch { /* ignore */ } };
+}
+
+// ---- audio prep: decode → 16 kHz mono → split at pauses → WAV chunks → Whisper ----
+const SR = 16000;
+const CHUNK_TARGET_S = 90;  // ~2.9 MB of WAV per request
+const CHUNK_SEARCH_S = 20;  // look back this far for the quietest spot to cut
+
+async function toMono16k(blob) {
+  const AC = window.AudioContext || window.webkitAudioContext;
+  const ctx = new AC();
+  try {
+    const decoded = await ctx.decodeAudioData(await blob.arrayBuffer());
+    const off = new OfflineAudioContext(1, Math.ceil(decoded.duration * SR), SR);
+    const src = off.createBufferSource();
+    src.buffer = decoded;
+    src.connect(off.destination);
+    src.start();
+    return (await off.startRendering()).getChannelData(0);
+  } finally {
+    try { ctx.close(); } catch { /* ignore */ }
+  }
+}
+
+function rms(samples, from, to) {
+  let sum = 0;
+  for (let i = from; i < to; i++) sum += samples[i] * samples[i];
+  return Math.sqrt(sum / Math.max(1, to - from));
+}
+
+function splitAtPauses(samples) {
+  const out = [];
+  const target = CHUNK_TARGET_S * SR;
+  const search = CHUNK_SEARCH_S * SR;
+  const frame = SR / 10; // 100 ms
+  let start = 0;
+  while (samples.length - start > target + search / 2) {
+    let best = start + target;
+    let bestE = Infinity;
+    for (let f = start + target - search; f < start + target; f += frame) {
+      const e = rms(samples, f, f + frame);
+      if (e < bestE) { bestE = e; best = f + frame / 2; }
+    }
+    out.push(samples.subarray(start, best));
+    start = best;
+  }
+  out.push(samples.subarray(start));
+  return out.filter((c) => c.length > SR * 0.5 && rms(c, 0, c.length) > 0.002); // drop near-silent bits
+}
+
+function encodeWav(samples) {
+  const buf = new ArrayBuffer(44 + samples.length * 2);
+  const v = new DataView(buf);
+  const str = (o, t) => { for (let i = 0; i < t.length; i++) v.setUint8(o + i, t.charCodeAt(i)); };
+  str(0, 'RIFF'); v.setUint32(4, 36 + samples.length * 2, true); str(8, 'WAVE');
+  str(12, 'fmt '); v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+  v.setUint32(24, SR, true); v.setUint32(28, SR * 2, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true);
+  str(36, 'data'); v.setUint32(40, samples.length * 2, true);
+  for (let i = 0; i < samples.length; i++) {
+    const x = Math.max(-1, Math.min(1, samples[i]));
+    v.setInt16(44 + i * 2, x < 0 ? x * 0x8000 : x * 0x7fff, true);
+  }
+  return new Blob([buf], { type: 'audio/wav' });
+}
+
+async function sendChunk(body, contentType, context) {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const res = await fetch('/api/transcribe', {
+      method: 'POST', body, credentials: 'same-origin',
+      headers: {
+        'content-type': contentType,
+        'x-user': encodeURIComponent(state.me),
+        'x-context': encodeURIComponent(context.slice(-400)),
+        'x-language': (navigator.language || 'en').slice(0, 2),
+      },
+    });
+    const data = await res.json().catch(() => ({}));
+    if (res.ok) return data.text || '';
+    if (attempt === 1 || res.status < 500) throw new Error(data.error || `Transcription failed (HTTP ${res.status})`);
+  }
+  return '';
+}
+
+async function transcribeRecording(blob) {
+  let chunks;
+  try {
+    chunks = splitAtPauses(await toMono16k(blob)).map(encodeWav);
+  } catch {
+    // Couldn't decode locally — send the original recording and let the server try.
+    return sendChunk(blob, blob.type || 'audio/webm', voice.transcript);
+  }
+  let text = '';
+  for (let i = 0; i < chunks.length; i++) {
+    if (chunks.length > 1) setMicStatus(`🎯 Transcribing with Whisper… part ${i + 1} of ${chunks.length}`);
+    const part = await sendChunk(chunks[i], 'audio/wav', (voice.transcript + ' ' + text).trim());
+    text = (text + ' ' + part).trim();
+  }
+  return text;
 }
 
 function stopRecording() {
