@@ -1,0 +1,15 @@
+{
+  "name": "daddy-do",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A ticketing system for household chores",
+  "scripts": {
+    "db:init:local": "wrangler d1 execute daddy-do --local --file=schema.sql",
+    "db:init:remote": "wrangler d1 execute daddy-do --remote --file=schema.sql",
+    "dev": "wrangler pages dev",
+    "deploy": "wrangler pages deploy"
+  },
+  "devDependencies": {
+    "wrangler": "^3.114.0"
+  }
+}

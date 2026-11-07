@@ -1,0 +1,10 @@
+{
+  "name": "Daddy-Do",
+  "short_name": "Daddy-Do",
+  "description": "Household chore ticketing",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f6f7fb",
+  "theme_color": "#2563eb",
+  "icons": [{ "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }]
+}

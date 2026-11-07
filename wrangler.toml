@@ -1,0 +1,9 @@
+name = "daddy-do"
+compatibility_date = "2025-01-01"
+pages_build_output_dir = "public"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "daddy-do"
+# Replace with the id printed by: npx wrangler d1 create daddy-do
+database_id = "00000000-0000-0000-0000-000000000000"

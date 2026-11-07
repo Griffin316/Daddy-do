@@ -1,0 +1,3 @@
+# Copy to .dev.vars for local dev (gitignored). In production set these as Pages secrets.
+HOUSEHOLD_PIN=change-me-to-a-long-passphrase
+SESSION_SECRET=any-long-random-string
