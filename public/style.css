@@ -1,3 +1,4 @@
+/* Phone-first help-desk layout: sticky header + tab strip, single 760px column of ticket cards. */
 :root {
   --bg: #f6f7fb;
   --card: #ffffff;
@@ -12,11 +13,16 @@
   --p4: #6b7280;
   --ok: #16a34a;
   --warn: #d97706;
+  --sched: #6d28d9;
+  --gold: #b7791f;
+  --gold-bg: #fff8e1;
+  --gold-ink: #6b4500;
+  --gold-line: #f5c542;
   --radius: 12px;
   color-scheme: light;
 }
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme="light"]) {
     --bg: #0f1115;
     --card: #181b22;
     --text: #e5e7eb;
@@ -25,8 +31,29 @@
     --accent: #3b82f6;
     --p3: #60a5fa;
     --p4: #9ca3af;
+    --sched: #c4b5fd;
+    --gold: #f2b84b;
+    --gold-bg: #3a2f10;
+    --gold-ink: #ffd36a;
+    --gold-line: #8a6a10;
     color-scheme: dark;
   }
+}
+:root[data-theme="dark"] {
+  --bg: #0f1115;
+  --card: #181b22;
+  --text: #e5e7eb;
+  --muted: #9ca3af;
+  --line: #2a2f3a;
+  --accent: #3b82f6;
+  --p3: #60a5fa;
+  --p4: #9ca3af;
+  --sched: #c4b5fd;
+  --gold: #f2b84b;
+  --gold-bg: #3a2f10;
+  --gold-ink: #ffd36a;
+  --gold-line: #8a6a10;
+  color-scheme: dark;
 }
 
 * { box-sizing: border-box; }
@@ -43,7 +70,7 @@ button, input, select, textarea { font: inherit; color: inherit; }
   display: flex; align-items: center; justify-content: space-between;
   padding: 12px 16px; padding-top: max(12px, env(safe-area-inset-top));
   background: var(--card); border-bottom: 1px solid var(--line);
-  position: sticky; top: 0; z-index: 5;
+  position: sticky; top: env(safe-area-inset-top, 0px); z-index: 5;
 }
 .brand { font-weight: 700; font-size: 18px; }
 .who { font-size: 13px; color: var(--muted); }
@@ -184,27 +211,24 @@ dialog::backdrop { background: rgba(0,0,0,.45); }
 .bell { position: relative; border: 0; background: none; font-size: 20px; cursor: pointer; padding: 4px; }
 .bell .badge { position: absolute; top: -2px; right: -6px; font-size: 11px; }
 .pts-chip {
-  border: 1px solid #f5c542; background: #fff8e1; color: #8a5a00; border-radius: 999px;
+  border: 1px solid var(--gold-line); background: var(--gold-bg); color: var(--gold-ink); border-radius: 999px;
   padding: 3px 10px; font-weight: 700; cursor: pointer; font-size: 13px;
 }
-@media (prefers-color-scheme: dark) { .pts-chip { background: #3a2f10; color: #ffd36a; border-color: #8a6a10; } }
 @media (max-width: 400px) { .who .me { display: none; } }
 
 /* schedule, points, updates on cards */
-.sched { color: #6d28d9; }
-@media (prefers-color-scheme: dark) { .sched { color: #c4b5fd; } }
-.gold { color: #b7791f; }
+.sched { color: var(--sched); }
+.gold { color: var(--gold); }
 .last-upd {
   margin-top: 8px; padding: 6px 10px; border-radius: 8px; background: var(--bg);
   border-left: 3px solid var(--accent); white-space: pre-wrap;
 }
-.gold-card { background: #fff8e1; border-color: #f5c542; color: #6b4500; }
-@media (prefers-color-scheme: dark) { .gold-card { background: #3a2f10; color: #ffd36a; border-color: #8a6a10; } }
+.gold-card { background: var(--gold-bg); border-color: var(--gold-line); color: var(--gold-ink); }
 
 /* rewards */
 .score .lv { font-weight: 800; font-size: 17px; }
-.big-pts { font-size: 28px; font-weight: 800; color: #b7791f; }
-.gold-bar > div { background: linear-gradient(90deg, #f5c542, #f59e0b); }
+.big-pts { font-size: 28px; font-weight: 800; color: var(--gold); }
+.gold-bar > div { background: linear-gradient(90deg, var(--gold-line), var(--gold)); }
 .hist { padding: 6px 0; border-bottom: 1px solid var(--line); }
 .hist:last-child { border-bottom: 0; }
 
