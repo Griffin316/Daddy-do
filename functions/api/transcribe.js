@@ -2,11 +2,13 @@
 // -> { text }. Cloudflare Workers AI Whisper large-v3-turbo via the "AI" binding.
 //
 // Accuracy helpers:
-//  - initial_prompt: household vocabulary (names, rooms, brands from Settings) plus open
+//  - initial_prompt: household dictionary spellings and phrases (lib/dictionary.js) plus open
 //    ticket titles, so Whisper spells "Moen cartridge" or "MERV filter" correctly.
 //  - X-Context header: the tail of the previous chunk's transcript, so long recordings
 //    split into chunks keep continuity (same trick Whisper uses internally).
 //  - vad_filter: skip silence, which is where Whisper tends to hallucinate.
+
+import { readDictionary, whisperTerms } from '../../lib/dictionary.js';
 
 const json = (data, status = 200) =>
   new Response(JSON.stringify(data), { status, headers: { 'content-type': 'application/json' } });
@@ -27,11 +29,12 @@ function toBase64(buf) {
 async function buildPrompt(db, previous) {
   const parts = ['A family member listing household chores and repairs.'];
   try {
-    const { results } = await db.prepare("SELECT key, value FROM settings WHERE key IN ('members','vocab')").all();
+    const { results } = await db.prepare("SELECT key, value FROM settings WHERE key IN ('members','vocab','dictionary')").all();
     const s = Object.fromEntries(results.map((r) => [r.key, r.value]));
     const names = JSON.parse(s.members || '[]').map((m) => m.name).filter(Boolean);
     if (names.length) parts.push(`People: ${names.join(', ')}.`);
-    if (s.vocab) parts.push(`Words: ${s.vocab.replace(/\s+/g, ' ').trim()}.`);
+    const terms = whisperTerms(readDictionary(s));
+    if (terms) parts.push(`Words we use: ${terms}.`);
     const open = await db.prepare(
       "SELECT title FROM tickets WHERE status NOT IN ('resolved','closed') ORDER BY updated_at DESC LIMIT 12",
     ).all();

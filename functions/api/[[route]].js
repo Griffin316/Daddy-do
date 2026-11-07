@@ -1,3 +1,5 @@
+import { cleanDictionary, readDictionary } from '../../lib/dictionary.js';
+
 // Daddy-Do REST API (Cloudflare Pages Function, D1 binding "DB").
 // Auth is handled by _middleware.js. The acting user's name comes in X-User.
 
@@ -454,7 +456,7 @@ async function getSettings(db) {
   return json({
     members: JSON.parse(s.members || '[]'),
     capacity_min: Number(s.capacity_min || 240),
-    vocab: s.vocab || '',
+    dictionary: readDictionary(s),
   });
 }
 
@@ -474,10 +476,10 @@ async function putSettings(db, request) {
     stmts.push(db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)')
       .bind('capacity_min', String(n)));
   }
-  if (body.vocab !== undefined) {
-    // Household words for speech recognition: names, rooms, brands, pets...
+  if (body.dictionary !== undefined) {
+    // Household dictionary for speech recognition + AI parsing (see lib/dictionary.js).
     stmts.push(db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)')
-      .bind('vocab', String(body.vocab).slice(0, 500)));
+      .bind('dictionary', JSON.stringify(cleanDictionary(body.dictionary))));
   }
   if (stmts.length) await db.batch(stmts);
   return getSettings(db);

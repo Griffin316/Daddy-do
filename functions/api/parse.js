@@ -4,6 +4,7 @@
 // proposals for review and then creates the ones the user keeps via POST /api/tickets.
 
 import Anthropic from '@anthropic-ai/sdk';
+import { readDictionary, claudeGlossary } from '../../lib/dictionary.js';
 
 const MODEL = 'claude-opus-5-5';
 const CATEGORIES = ['repair', 'cleaning', 'yard', 'errand', 'kids', 'admin', 'project', 'general'];
@@ -65,6 +66,7 @@ The input is a raw speech-to-text transcript: expect run-on sentences, filler wo
 - Only include supplies in "shopping" when the job plausibly needs a purchase.
 - Venting, general complaints, or information with no action belong in not_tasks, not items.
 - If something is too vague to act on, still make your best-guess ticket, and add one short clarifying question.
+- Use the household dictionary when one is given: write names exactly as spelled there, fix transcript words that match a listed mis-hearing (or clearly sound like a listed name in context), and expand household shorthand into what it means — a shorthand that means several jobs becomes several tickets. Put useful notes from the dictionary (who someone is, a phone number) in the description.
 Never invent requests that weren't said.`;
 
 export async function onRequestPost({ request, env }) {
@@ -87,9 +89,12 @@ export async function onRequestPost({ request, env }) {
   const weekday = new Intl.DateTimeFormat('en-US', { timeZone: tz, weekday: 'long' }).format(now);
   const speaker = decodeURIComponent(request.headers.get('x-user') || 'a household member');
 
+  const settingsRows = await env.DB.prepare("SELECT key, value FROM settings WHERE key IN ('vocab','dictionary')").all();
+  const glossary = claudeGlossary(readDictionary(Object.fromEntries(settingsRows.results.map((r) => [r.key, r.value]))));
+
   const userMsg = `Today is ${weekday} ${today}.
 Speaker: ${speaker}
-
+${glossary ? `\nHousehold dictionary:\n${glossary}\n` : ''}
 Existing open tickets (for duplicate detection):
 ${open.length ? open.map((t) => `#${t.id} ${t.title}`).join('\n') : '(none)'}
 

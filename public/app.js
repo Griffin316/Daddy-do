@@ -39,7 +39,9 @@ const state = {
   unread: 0,
   lastNotifId: Number(localStorage.getItem('dd_last_notif') || 0),
   points: null,
+  dictionary: [],
 };
+const HIDDEN_VIEWS = ['dict']; // reachable from Settings / Talk, not in the tab strip
 
 // ---------- utils ----------
 
@@ -239,7 +241,7 @@ async function boot() {
     const settings = await api('/settings');
     state.members = settings.members;
     state.capacity = settings.capacity_min;
-    state.vocab = settings.vocab || '';
+    state.dictionary = settings.dictionary || [];
     if (!state.members.some((m) => m.name === state.me)) return renderWhoAmI();
     await refresh();
     render();
@@ -330,7 +332,7 @@ function tabsFor() {
 
 function render() {
   const tabs = tabsFor();
-  if (!tabs.some(([k]) => k === state.tab)) state.tab = tabs[0][0];
+  if (!tabs.some(([k]) => k === state.tab) && !HIDDEN_VIEWS.includes(state.tab)) state.tab = tabs[0][0];
   localStorage.setItem('dd_tab', state.tab);
 
   const pts = myTotals();
@@ -355,6 +357,7 @@ function render() {
   const views = {
     talk: viewVoice, new: viewNew, mine: viewMine, week: viewWeek, triage: viewTriage,
     backlog: viewBacklog, done: viewDone, all: viewAll, settings: viewSettings, rewards: viewRewards,
+    dict: viewDictionary,
   };
   (views[state.tab] || viewNew)();
 }
@@ -721,11 +724,13 @@ function viewSettings() {
       <label style="margin-top:16px">Hours available for chores per week</label>
       <input type="number" name="cap" min="0" max="168" step="0.5" value="${state.capacity / 60}">
       <p class="muted small">Be honest — this is what "This week" plans against. Over-capacity shows red so you can negotiate what slips.</p>
-      <label for="vocab" style="margin-top:16px">Words the voice transcriber should know</label>
-      <textarea id="vocab" name="vocab" rows="3" maxlength="500" placeholder="Kids' and pets' names, rooms, brands: Emma, Biscuit, mudroom, Moen, MERV 11, Ring doorbell, Trex deck">${esc(state.vocab || '')}</textarea>
-      <p class="muted small">Whisper uses these, plus your open ticket titles, to spell things right. Shared by everyone in the house.</p>
       <button class="btn primary block" style="margin-top:12px">Save</button>
     </form>
+    <div class="card row spread">
+      <div class="grow" style="min-width:0"><b>📖 Household dictionary</b>
+        <div class="muted small">${state.dictionary.length ? `${state.dictionary.length} names, words &amp; phrases` : 'Teach it names (Dr. Saan), and shorthand ("the usual")'}</div></div>
+      <button type="button" class="btn sm primary" id="open-dict">Open</button>
+    </div>
     <div class="card">
       <b>Speech recognition on this phone</b>
       <div class="chips" id="stt" style="margin-top:8px">
@@ -755,16 +760,16 @@ function viewSettings() {
     })).filter((m) => m.name);
     try {
       const old = state.me;
-      const r = await api('/settings', { method: 'PUT', body: { members, capacity_min: Math.round(+e.target.cap.value * 60), vocab: e.target.vocab.value } });
+      const r = await api('/settings', { method: 'PUT', body: { members, capacity_min: Math.round(+e.target.cap.value * 60) } });
       state.members = r.members;
       state.capacity = r.capacity_min;
-      state.vocab = r.vocab || '';
       toast('Saved');
       if (!state.members.some((m) => m.name === old)) return renderWhoAmI();
       render();
     } catch (er) { toast(er.message); }
   };
   $('#notif-on').onclick = enableNotifications;
+  $('#open-dict').onclick = () => { state.tab = 'dict'; render(); window.scrollTo(0, 0); };
   $('#stt').querySelectorAll('[data-stt]').forEach((b) => {
     b.onclick = () => { localStorage.setItem('dd_stt', b.dataset.stt); toast(b.dataset.stt === 'whisper' ? 'Using Whisper' : 'Using phone speech'); viewSettings(); };
   });
@@ -797,6 +802,8 @@ const voice = {
   timer: null,
   busy: '',
   result: null, // { items, questions, not_tasks }
+  machine: '', // what speech-to-text produced (before hand edits), for learning corrections
+  learn: [],
   requester: '',
 };
 
@@ -823,6 +830,7 @@ function viewVoice() {
     </div>
     <label>Transcript <span class="muted">(edit anything it mis-heard — or type / use your keyboard's mic)</span></label>
     <textarea id="tx" rows="7" placeholder="e.g. &quot;The kitchen faucet is dripping again, and can you put the Christmas lights up before the party on the 14th, oh and the smoke detector in the hallway keeps chirping…&quot;">${esc(voice.transcript + (voice.interim ? ' ' + voice.interim : ''))}</textarea>
+    <p class="small" style="margin:6px 0 0"><button class="link small" id="teach">📖 Teach it a name or phrase</button> <span class="muted">· ${state.dictionary.length} known</span></p>
     ${isFixer() ? `<label>Who asked?</label><select id="reqr">${state.members.map((m) => `<option ${m.name === voice.requester ? 'selected' : ''}>${esc(m.name)}</option>`).join('')}</select>` : ''}
     <div class="row" style="margin-top:12px">
       <button class="btn primary grow" id="parse" ${voice.busy ? 'disabled' : ''}>✨ Turn into tickets</button>
@@ -831,10 +839,11 @@ function viewVoice() {
 
   $('#mic').onclick = () => (voice.recording ? stopRecording() : startRecording());
   $('#stt-switch').onclick = () => { if (!voice.recording) { state.tab = 'settings'; render(); } };
+  $('#teach').onclick = () => { if (!voice.recording) { voice.returnToTalk = true; state.tab = 'dict'; render(); window.scrollTo(0, 0); } };
   $('#tx').oninput = (e) => { voice.transcript = e.target.value; voice.interim = ''; };
   const rq = $('#reqr');
   if (rq) rq.onchange = (e) => { voice.requester = e.target.value; };
-  $('#clear').onclick = () => { voice.transcript = ''; voice.interim = ''; viewVoice(); };
+  $('#clear').onclick = () => { voice.transcript = ''; voice.interim = ''; voice.machine = ''; viewVoice(); };
   $('#parse').onclick = parseTranscript;
 }
 
@@ -876,7 +885,12 @@ function startSpeechRecognition() {
     let interim = '';
     for (let i = ev.resultIndex; i < ev.results.length; i++) {
       const r = ev.results[i];
-      if (r.isFinal) voice.transcript = (voice.transcript + ' ' + r[0].transcript.trim()).trim();
+      if (r.isFinal) {
+        const fixed = applyDictionary(r[0].transcript.trim());
+        voice.machine = (voice.machine + ' ' + fixed.text).trim();
+        voice.transcript = (voice.transcript + ' ' + fixed.text).trim();
+        announceFixes(fixed.fixes);
+      }
       else interim += r[0].transcript;
     }
     voice.interim = interim.trim();
@@ -923,7 +937,12 @@ async function startMediaRecorder() {
     viewVoice();
     try {
       const text = await transcribeRecording(blob);
-      if (text) voice.transcript = (voice.transcript + ' ' + text).trim();
+      if (text) {
+        const fixed = applyDictionary(text);
+        voice.machine = (voice.machine + ' ' + fixed.text).trim();
+        voice.transcript = (voice.transcript + ' ' + fixed.text).trim();
+        announceFixes(fixed.fixes);
+      }
       else toast("Didn't catch any speech — try again a little closer to the phone");
     } catch (e) {
       toast(e.message);
@@ -1068,9 +1087,14 @@ function stopRecording() {
 
 async function parseTranscript() {
   if (voice.recording) stopRecording();
-  const text = ($('#tx')?.value || voice.transcript).trim();
+  const typed = ($('#tx')?.value || voice.transcript).trim();
+  if (!typed) return toast('Say or type something first');
+  const fixed = applyDictionary(typed);
+  const text = fixed.text;
+  announceFixes(fixed.fixes);
+  // Words she corrected by hand in the transcript → offer to remember them.
+  voice.learn = voice.machine ? learnCorrections(voice.machine, typed) : [];
   voice.transcript = text;
-  if (!text) return toast('Say or type something first');
   voice.busy = '✨ Working out the to-dos…';
   viewVoice();
   try {
@@ -1103,6 +1127,11 @@ function viewVoiceReview() {
     <div class="row spread"><h2>${items.length} to-do${items.length === 1 ? '' : 's'} found</h2>
       <button class="link" id="back">← Edit transcript</button></div>
     <p class="muted small">Untick anything you don't want, tweak, then file. ${isFixer() ? `Filed as requested by <b>${esc(voice.requester)}</b>.` : ''}</p>
+    ${(voice.learn || []).length ? `<div class="card learn"><b>📖 Remember your corrections?</b>
+      <p class="muted small">You fixed these in the transcript. Save them and they'll be corrected automatically next time.</p>
+      ${voice.learn.map((l, i) => `<div class="row spread learn-row"><span class="small"><s>${esc(l.heard)}</s> → <b>${esc(l.text)}</b></span>
+        <button class="btn sm" data-learn="${i}">${l.saved ? '✓ Saved' : 'Remember'}</button></div>`).join('')}
+    </div>` : ''}
     ${questions.length ? `<div class="card" style="border-color:var(--warn)"><b>🤔 Worth clarifying</b><ul class="small">${questions.map((q) => `<li>${esc(q)}</li>`).join('')}</ul></div>` : ''}
     <div id="props">
     ${items.map((it, i) => `
@@ -1132,7 +1161,18 @@ function viewVoiceReview() {
     <button class="btn block" id="discard" style="margin-top:8px">Discard</button>`;
 
   $('#back').onclick = () => { voice.result = null; viewVoice(); };
-  $('#discard').onclick = () => { voice.result = null; voice.transcript = ''; viewVoice(); };
+  app.querySelectorAll('[data-learn]').forEach((b) => {
+    b.onclick = async () => {
+      const l = voice.learn[+b.dataset.learn];
+      if (l.saved) return;
+      const dict = state.dictionary.map((e) => ({ ...e, heard: [...e.heard] }));
+      const hit = dict.find((e) => e.kind === 'word' && e.text.toLowerCase() === l.text.toLowerCase());
+      if (hit) { if (!hit.heard.some((h) => h.toLowerCase() === l.heard.toLowerCase())) hit.heard.push(l.heard); }
+      else dict.push({ kind: 'word', text: l.text, heard: [l.heard], means: '' });
+      if (await saveDictionary(dict)) { l.saved = true; toast(`📖 Remembered: “${l.heard}” → ${l.text}`); viewVoiceReview(); }
+    };
+  });
+  $('#discard').onclick = () => { voice.result = null; voice.transcript = ''; voice.machine = ''; viewVoice(); };
   $('#props').querySelectorAll('[data-i]').forEach((card) => {
     const it = items[+card.dataset.i];
     card.querySelector('.keep').onchange = (e) => { it.keep = e.target.checked; viewVoiceReview(); };
@@ -1401,6 +1441,191 @@ async function enableNotifications() {
   await reg?.showNotification('Daddy-Do', { body: "✓ You'll get a buzz here when there's an update.", icon: '/icon-192.png', badge: '/icon-192.png' });
   toast('Notifications on 🔔');
   if (state.tab === 'settings') render();
+}
+
+// ---------- household dictionary: names, mis-hearings and shorthand ----------
+// Spellings + phrases also prime Whisper (server) and act as a glossary for Claude (server).
+// Here on the phone we fix listed mis-hearings right away and learn new ones from hand edits.
+
+const reEsc = (t) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+function applyDictionary(text) {
+  const fixes = [];
+  let out = text;
+  const pairs = [];
+  for (const e of state.dictionary) {
+    if (e.kind !== 'word') continue;
+    for (const h of e.heard) pairs.push([h, e.text]);
+  }
+  pairs.sort((a, b) => b[0].length - a[0].length); // longest phrase first
+  for (const [heard, right] of pairs) {
+    const words = heard.split(/\s+/).map((w) => reEsc(w.replace(/[.,!?;:]+$/, '')));
+    const re = new RegExp(`(^|[^\\p{L}\\p{N}])(${words.join('[\\s,.\\-]+')})(?=$|[^\\p{L}\\p{N}])`, 'giu');
+    out = out.replace(re, (m, pre, hit) => {
+      if (hit === right) return m;
+      fixes.push({ from: hit, to: right });
+      return pre + right;
+    });
+  }
+  return { text: out, fixes };
+}
+
+function announceFixes(fixes) {
+  if (!fixes.length) return;
+  const uniq = [...new Map(fixes.map((f) => [f.from.toLowerCase() + '→' + f.to, f])).values()];
+  toast(`📖 Fixed: ${uniq.slice(0, 3).map((f) => `“${f.from}” → ${f.to}`).join(', ')}${uniq.length > 3 ? '…' : ''}`);
+}
+
+// Compare what speech-to-text wrote with what she ended up sending; short word swaps are
+// likely mis-hearings ("doctor sand" → "Dr. Saan") worth remembering.
+function learnCorrections(machine, edited) {
+  const A = machine.split(/\s+/).filter(Boolean);
+  const B = edited.split(/\s+/).filter(Boolean);
+  if (!A.length || !B.length || A.length > 1500 || B.length > 1500) return [];
+  const norm = (t) => t.toLowerCase().replace(/[^\p{L}\p{N}']/gu, '');
+  const a = A.map(norm); const b = B.map(norm);
+  const L = Array.from({ length: a.length + 1 }, () => new Uint16Array(b.length + 1));
+  for (let i = a.length - 1; i >= 0; i--) {
+    for (let j = b.length - 1; j >= 0; j--) {
+      L[i][j] = a[i] === b[j] ? L[i + 1][j + 1] + 1 : Math.max(L[i + 1][j], L[i][j + 1]);
+    }
+  }
+  const out = [];
+  let i = 0; let j = 0; let del = []; let ins = [];
+  const flush = () => {
+    const clean = (ws) => ws.join(' ').replace(/^[^\p{L}\p{N}]+|[.,!?;:]+$/gu, '');
+    const heard = clean(del); const text = clean(ins);
+    if (del.length && ins.length && del.length <= 4 && ins.length <= 4 && heard && text
+      && norm(heard.replace(/\s/g, '')) !== norm(text.replace(/\s/g, ''))) out.push({ heard, text });
+    del = []; ins = [];
+  };
+  while (i < a.length || j < b.length) {
+    if (i < a.length && j < b.length && a[i] === b[j]) { flush(); i++; j++; }
+    else if (j < b.length && (i === a.length || L[i][j + 1] >= L[i + 1][j])) ins.push(B[j++]);
+    else del.push(A[i++]);
+  }
+  flush();
+  const seen = new Set();
+  return out.filter((x) => { const k = x.heard.toLowerCase() + '|' + x.text; if (seen.has(k)) return false; seen.add(k); return true; }).slice(0, 5);
+}
+
+async function saveDictionary(dict) {
+  try {
+    const r = await api('/settings', { method: 'PUT', body: { dictionary: dict } });
+    state.dictionary = r.dictionary || [];
+    return true;
+  } catch (e) {
+    toast(e.message);
+    return false;
+  }
+}
+
+const dictUi = { kind: 'word', editing: -1, test: 'Can you call doctor sand about Emma’s ear and do the usual on Saturday' };
+
+function viewDictionary() {
+  const D = state.dictionary;
+  const words = D.map((e, i) => [e, i]).filter(([e]) => e.kind === 'word');
+  const phrases = D.map((e, i) => [e, i]).filter(([e]) => e.kind === 'phrase');
+  const ed = dictUi.editing >= 0 ? D[dictUi.editing] : null;
+  if (ed) dictUi.kind = ed.kind;
+  const k = dictUi.kind;
+  const row = ([e, i]) => `<div class="dict-row">
+      <div class="grow" style="min-width:0">
+        ${e.kind === 'word'
+          ? `<b>${esc(e.text)}</b>${e.heard.length ? `<div class="small muted">heard as: ${e.heard.map((h) => `“${esc(h)}”`).join(', ')}</div>` : ''}`
+          : `<b>“${esc(e.text)}”</b><div class="small">→ ${esc(e.means)}</div>`}
+        ${e.kind === 'word' && e.means ? `<div class="small muted">${esc(e.means)}</div>` : ''}
+      </div>
+      <div class="row" style="flex-wrap:nowrap">
+        <button class="btn sm" data-edit="${i}">Edit</button>
+        <button class="btn sm danger" data-del="${i}" aria-label="Delete ${esc(e.text)}">✕</button>
+      </div>
+    </div>`;
+  app.innerHTML = `
+    <div class="row spread"><h2>📖 Household dictionary</h2>
+      <button class="link" id="dict-back">← ${voice.returnToTalk ? 'Back to Talk' : 'Settings'}</button></div>
+    <p class="muted small">Teach the voice transcriber your family's words. Names get spelled right, known mis-hearings are fixed automatically, and Claude expands your shorthand into real jobs.</p>
+
+    <form id="df" class="card">
+      <b>${ed ? 'Edit entry' : 'Add an entry'}</b>
+      <div class="chips" style="margin-top:8px" id="dkind">
+        <button type="button" class="chip ${k === 'word' ? 'on' : ''}" data-k="word">Name / word</button>
+        <button type="button" class="chip ${k === 'phrase' ? 'on' : ''}" data-k="phrase">Shorthand / expression</button>
+      </div>
+      ${k === 'word' ? `
+        <label for="d-text">Correct spelling</label>
+        <input type="text" id="d-text" maxlength="80" placeholder="Dr. Saan" value="${esc(ed?.text || '')}" required>
+        <label for="d-heard">Often misheard as <span class="muted">(comma-separated, optional)</span></label>
+        <input type="text" id="d-heard" maxlength="400" placeholder="doctor sand, doctor son, dr sahn" value="${esc(ed?.heard.join(', ') || '')}">
+        <label for="d-means">Note <span class="muted">(optional, added to tickets)</span></label>
+        <input type="text" id="d-means" maxlength="300" placeholder="Emma's pediatrician · (555) 010-4477" value="${esc(ed?.means || '')}">
+      ` : `
+        <label for="d-text">When we say</label>
+        <input type="text" id="d-text" maxlength="80" placeholder="the usual" value="${esc(ed?.text || '')}" required>
+        <label for="d-means">It means</label>
+        <textarea id="d-means" rows="2" maxlength="300" placeholder="mow the front and back lawn, and take the bins to the curb Tuesday night" required>${esc(ed?.means || '')}</textarea>
+      `}
+      <div class="row" style="margin-top:10px">
+        <button class="btn primary">${ed ? 'Save changes' : 'Add'}</button>
+        ${ed ? '<button type="button" class="btn" id="d-cancel">Cancel</button>' : ''}
+      </div>
+    </form>
+
+    <h3>Names &amp; words (${words.length})</h3>
+    ${words.length ? `<div class="card">${words.map(row).join('')}</div>` : '<p class="empty small">Add doctors, teachers, kids, pets, streets, brands: anything it spells wrong.</p>'}
+    <h3>Shorthand &amp; expressions (${phrases.length})</h3>
+    ${phrases.length ? `<div class="card">${phrases.map(row).join('')}</div>` : '<p class="empty small">e.g. “the usual”, “Costco run”, “Grandma’s”, “the thing in the garage”.</p>'}
+
+    <div class="card">
+      <b>Try it</b>
+      <label for="d-test">Type something the way it might be transcribed</label>
+      <input type="text" id="d-test" value="${esc(dictUi.test)}">
+      <div class="small" id="d-out" style="margin-top:8px"></div>
+      <p class="muted small">Name fixes happen on the phone right away. Shorthand is expanded by Claude when you tap ✨ Turn into tickets.</p>
+    </div>`;
+
+  const showTest = () => {
+    const v = $('#d-test').value;
+    dictUi.test = v;
+    const r = applyDictionary(v);
+    const used = state.dictionary.filter((e) => e.kind === 'phrase' && new RegExp(`(^|[^\\p{L}])${reEsc(e.text)}($|[^\\p{L}])`, 'iu').test(r.text));
+    $('#d-out').innerHTML = `→ ${esc(r.text)}${used.length ? `<div class="muted" style="margin-top:4px">Claude will read ${used.map((e) => `“${esc(e.text)}” as <i>${esc(e.means)}</i>`).join('; ')}</div>` : ''}`;
+  };
+  $('#d-test').oninput = showTest;
+  showTest();
+  $('#dict-back').onclick = () => { state.tab = voice.returnToTalk ? 'talk' : 'settings'; voice.returnToTalk = false; dictUi.editing = -1; render(); };
+  $('#dkind').querySelectorAll('[data-k]').forEach((b) => {
+    b.onclick = () => { if (dictUi.editing < 0) { dictUi.kind = b.dataset.k; viewDictionary(); } };
+  });
+  const cancel = $('#d-cancel');
+  if (cancel) cancel.onclick = () => { dictUi.editing = -1; viewDictionary(); };
+  $('#df').onsubmit = async (e) => {
+    e.preventDefault();
+    const entry = {
+      kind: dictUi.kind,
+      text: $('#d-text').value,
+      heard: $('#d-heard')?.value.split(',') || [],
+      means: $('#d-means').value,
+    };
+    const dict = [...state.dictionary];
+    if (dictUi.editing >= 0) dict[dictUi.editing] = entry; else dict.push(entry);
+    if (await saveDictionary(dict)) {
+      toast(dictUi.editing >= 0 ? 'Saved' : `📖 Added “${entry.text.trim()}”`);
+      dictUi.editing = -1;
+      viewDictionary();
+    }
+  };
+  app.querySelectorAll('[data-edit]').forEach((b) => {
+    b.onclick = () => { dictUi.editing = +b.dataset.edit; viewDictionary(); window.scrollTo(0, 0); };
+  });
+  app.querySelectorAll('[data-del]').forEach((b) => {
+    b.onclick = async () => {
+      const i = +b.dataset.del;
+      if (b.dataset.armed !== '1') { b.dataset.armed = '1'; b.textContent = 'Delete?'; return; } // in-page confirm
+      const dict = state.dictionary.filter((_, j) => j !== i);
+      if (await saveDictionary(dict)) { dictUi.editing = -1; toast('Removed'); viewDictionary(); }
+    };
+  });
 }
 
 // ---------- ticket detail modal ----------

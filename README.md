@@ -33,6 +33,17 @@ She files ─► New ─► (you triage: size + priority) ─► Backlog ─► 
 
 **Weekly ritual (10 min, Sunday night):** open *This week*, hit **⚡ Auto-fill from backlog** (it fills by priority until your capacity runs out), and show her the plan. If something she wants isn't on it, the capacity bar makes the trade-off obvious: *"Sure, which one bumps to next week?"*
 
+## 📖 Household dictionary
+
+⚙︎ Settings → **Household dictionary** (or **📖 Teach it a name or phrase** on the Talk screen). There are two kinds of entry:
+
+| Kind | Example | What happens |
+|---|---|---|
+| **Name / word** | **Dr. Saan**: misheard as "doctor sand, doctor son"; note "Emma's pediatrician · (555) 010-4477" | The spelling primes Whisper. The listed mis-hearings are replaced on the phone as soon as the text comes back (whole phrases only, so "sand the deck" is left alone). Claude gets the name, its mis-hearings and the note, so it also catches unlisted variants and puts the phone number in the ticket. |
+| **Shorthand / expression** | "the usual" means "mow the lawn, and take the bins to the curb Tuesday night" | Whisper is primed with the phrase. Claude expands it, so one shorthand can become several tickets. |
+
+**It learns from edits:** if she fixes a word in the transcript before tapping ✨, the review screen offers to remember the fix ("bell ski → Belsky", **Remember**). The **Try it** box shows how a sentence will be corrected. Stored as JSON in `settings.dictionary`; logic shared in `lib/dictionary.js`.
+
 ## ⭐ Points & rewards
 
 | | Points |
@@ -56,7 +67,7 @@ The 🏆 tab shows Dad's balance, his level (Apprentice → Handy → Fix-it Pro
 
 1. Tap the mic and talk, e.g. *"the kitchen faucet's dripping again, the smoke detector in the hall keeps chirping, and can you get the Christmas lights up before the party on the 14th"*.
 2. **Speech-to-text (default: Whisper):** the phone records and converts the audio to 16 kHz mono WAV, which is Whisper's native format. Long recordings are split at natural pauses into chunks of about 90 seconds. Each chunk goes to **Cloudflare Workers AI `whisper-large-v3-turbo`** (`/api/transcribe`) along with:
-   - a **vocabulary hint**: household names, rooms and brands from ⚙︎ Settings, plus the titles of open tickets;
+   - a **vocabulary hint**: spellings and phrases from the 📖 Household dictionary, plus the titles of open tickets;
    - the **end of the previous chunk's text**, so sentences carry over between chunks;
    - **voice-activity filtering** and anti-hallucination settings.
 

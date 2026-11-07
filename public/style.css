@@ -242,3 +242,10 @@ dialog::backdrop { background: rgba(0,0,0,.45); }
 /* recording level meter */
 .lvl { height: 6px; width: min(220px, 70%); margin: 12px auto 0; border-radius: 999px; background: var(--line); overflow: hidden; }
 .lvl > div { height: 100%; width: 0; background: var(--ok); transition: width 80ms linear; }
+
+/* household dictionary */
+.dict-row { display: flex; gap: 10px; align-items: center; padding: 8px 0; border-bottom: 1px solid var(--line); }
+.dict-row:last-child { border-bottom: 0; }
+.learn { border-color: var(--accent); }
+.learn-row { padding: 6px 0; }
+.learn s { color: var(--muted); }
