@@ -6,6 +6,7 @@
 
 import Anthropic from '@anthropic-ai/sdk';
 import { readDictionary, aiGlossary } from '../../lib/dictionary.js';
+import { geminiKey } from '../../lib/secrets.js';
 
 const CLAUDE_MODEL = 'claude-opus-5-5';
 const GEMINI_MODEL_DEFAULT = 'gemini-3.6-flash'; // stable Flash with a free tier; override with GEMINI_MODEL
@@ -77,7 +78,7 @@ class ParseError extends Error {
 }
 
 // ---- Gemini (generateContent REST, JSON-schema constrained output) ----
-async function callGemini(env, userMsg) {
+async function callGemini(env, apiKey, userMsg) {
   const model = env.GEMINI_MODEL || GEMINI_MODEL_DEFAULT;
   const base = env.GEMINI_BASE_URL || 'https://generativelanguage.googleapis.com'; // override only for local tests
   const url = `${base}/v1beta/models/${encodeURIComponent(model)}:generateContent`;
@@ -94,7 +95,7 @@ async function callGemini(env, userMsg) {
   });
   const post = (b) => fetch(url, {
     method: 'POST',
-    headers: { 'content-type': 'application/json', 'x-goog-api-key': env.GEMINI_API_KEY },
+    headers: { 'content-type': 'application/json', 'x-goog-api-key': apiKey },
     body: JSON.stringify(b),
   });
 
@@ -106,7 +107,7 @@ async function callGemini(env, userMsg) {
     else throw new ParseError(`AI error (400): ${errText.slice(0, 300)}`);
   }
   if (res.status === 429) throw new ParseError('Free AI quota used up for now — try again in a minute (daily limits reset at midnight Pacific).', 429);
-  if (res.status === 401 || res.status === 403) throw new ParseError('GEMINI_API_KEY is invalid or not allowed for this model.', 500);
+  if (res.status === 401 || res.status === 403) throw new ParseError('The Gemini key was rejected — paste a new one in ⚙︎ Settings → AI for voice.', 500);
   if (!res.ok) throw new ParseError(`AI error (${res.status}): ${(await res.text()).slice(0, 300)}`);
 
   const data = await res.json();
@@ -160,9 +161,10 @@ async function callClaude(env, userMsg) {
 }
 
 export async function onRequestPost({ request, env }) {
-  const provider = env.GEMINI_API_KEY ? 'gemini' : env.ANTHROPIC_API_KEY ? 'claude' : null;
+  const gem = await geminiKey(env, env.DB); // Cloudflare secret, or the key saved in the app's Settings
+  const provider = gem.key ? 'gemini' : env.ANTHROPIC_API_KEY ? 'claude' : null;
   if (!provider) {
-    return json({ error: 'Voice parsing is not set up: add the GEMINI_API_KEY secret in Cloudflare.' }, 503);
+    return json({ error: 'Voice parsing is off: add your free Gemini key in ⚙︎ Settings → AI for voice.' }, 503);
   }
   const body = await request.json().catch(() => ({}));
   const text = String(body.text || '').trim();
@@ -196,7 +198,7 @@ ${text}
 
   let parsed;
   try {
-    parsed = provider === 'gemini' ? await callGemini(env, userMsg) : await callClaude(env, userMsg);
+    parsed = provider === 'gemini' ? await callGemini(env, gem.key, userMsg) : await callClaude(env, userMsg);
   } catch (err) {
     if (err instanceof ParseError) return json({ error: err.message }, err.status);
     return json({ error: 'Could not reach the AI service.' }, 502);

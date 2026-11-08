@@ -1,4 +1,5 @@
 import { cleanDictionary, readDictionary } from '../../lib/dictionary.js';
+import { encryptSecret, geminiKey, keyHint } from '../../lib/secrets.js';
 
 // Daddy-Do REST API (Cloudflare Pages Function, D1 binding "DB").
 // Auth is handled by _middleware.js. The acting user's name comes in X-User.
@@ -450,17 +451,41 @@ async function redeemReward(db, actor, id) {
 
 // ---------- settings & stats ----------
 
-async function getSettings(db) {
+async function getSettings(db, env) {
   const { results } = await db.prepare('SELECT key, value FROM settings').all();
   const s = Object.fromEntries(results.map((r) => [r.key, r.value]));
+  // AI status for Settings: which provider is active and where its key came from. Never the key itself.
+  const g = await geminiKey(env, db);
+  const ai = g.key
+    ? { provider: 'gemini', source: g.source, hint: keyHint(g.key), model: env.GEMINI_MODEL || 'gemini-3.6-flash' }
+    : env.ANTHROPIC_API_KEY ? { provider: 'claude', source: 'cloudflare', hint: '' } : { provider: null, source: null, hint: '' };
   return json({
     members: JSON.parse(s.members || '[]'),
     capacity_min: Number(s.capacity_min || 240),
     dictionary: readDictionary(s),
+    ai,
   });
 }
 
-async function putSettings(db, request) {
+// Check a Gemini key with Google before saving it, so a typo shows up right away.
+async function verifyGeminiKey(env, key) {
+  const base = env.GEMINI_BASE_URL || 'https://generativelanguage.googleapis.com';
+  const model = env.GEMINI_MODEL || 'gemini-3.6-flash';
+  let res;
+  try {
+    res = await fetch(`${base}/v1beta/models/${encodeURIComponent(model)}`, { headers: { 'x-goog-api-key': key } });
+  } catch {
+    throw new Error("Couldn't reach Google to check the key — try again.");
+  }
+  if (res.ok) return;
+  if (res.status === 400 || res.status === 401 || res.status === 403) {
+    throw new Error('Google rejected this key. Copy it again from aistudio.google.com/apikey.');
+  }
+  if (res.status === 404) throw new Error(`The key works, but model ${model} isn't available to it.`);
+  throw new Error(`Google answered ${res.status} — try again in a minute.`);
+}
+
+async function putSettings(db, request, env) {
   const body = await request.json().catch(() => ({}));
   const stmts = [];
   if (Array.isArray(body.members)) {
@@ -481,8 +506,19 @@ async function putSettings(db, request) {
     stmts.push(db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)')
       .bind('dictionary', JSON.stringify(cleanDictionary(body.dictionary))));
   }
+  if (body.gemini_api_key !== undefined) {
+    const key = String(body.gemini_api_key || '').trim();
+    if (!key) {
+      stmts.push(db.prepare("DELETE FROM settings WHERE key = 'gemini_key_enc'"));
+    } else {
+      if (key.length < 20 || key.length > 200 || /\s/.test(key)) return bad("That doesn't look like a Gemini API key.");
+      try { await verifyGeminiKey(env, key); } catch (e) { return bad(e.message); }
+      stmts.push(db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)')
+        .bind('gemini_key_enc', await encryptSecret(env, key)));
+    }
+  }
   if (stmts.length) await db.batch(stmts);
-  return getSettings(db);
+  return getSettings(db, env);
 }
 
 async function stats(db) {
@@ -535,8 +571,8 @@ export async function onRequest({ request, env, params }) {
       }
       if (sub === 'redeem' && method === 'POST') return await redeemReward(db, actor, numId);
     }
-    if (res === 'settings' && method === 'GET') return await getSettings(db);
-    if (res === 'settings' && method === 'PUT') return await putSettings(db, request);
+    if (res === 'settings' && method === 'GET') return await getSettings(db, env);
+    if (res === 'settings' && method === 'PUT') return await putSettings(db, request, env);
     if (res === 'stats' && method === 'GET') return await stats(db);
     return bad('Not found', 404);
   } catch (err) {

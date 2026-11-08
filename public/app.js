@@ -108,6 +108,7 @@ const state = {
   lastNotifId: Number(localStorage.getItem('dd_last_notif') || 0),
   points: null,
   dictionary: [],
+  ai: { provider: null },
   selectedId: null,
 };
 const HIDDEN_VIEWS = ['dict']; // reachable from Settings / Talk, not in the tab strip
@@ -313,6 +314,7 @@ async function boot() {
     state.members = settings.members;
     state.capacity = settings.capacity_min;
     state.dictionary = settings.dictionary || [];
+    state.ai = settings.ai || { provider: null };
     if (!state.members.some((m) => m.name === state.me)) return renderWhoAmI();
     await refresh();
     render();
@@ -787,6 +789,7 @@ function viewAll() {
 function viewSettings() {
   app.innerHTML = `
     <h2>Settings</h2>
+    ${state.ai?.provider ? '' : aiCard()}
     <form id="sf" class="card">
       <label>Household members</label>
       <div id="members">
@@ -798,6 +801,7 @@ function viewSettings() {
       <p class="muted small">Be honest — this is what "This week" plans against. Over-capacity shows red so you can negotiate what slips.</p>
       <button class="btn primary block" style="margin-top:12px">Save</button>
     </form>
+    ${state.ai?.provider ? aiCard() : ''}
     <div class="card row spread">
       <div class="grow" style="min-width:0"><b>📖 Household dictionary</b>
         <div class="muted small">${state.dictionary.length ? `${state.dictionary.length} names, words &amp; phrases` : 'Teach it names (Dr. Saan), and shorthand ("the usual")'}</div></div>
@@ -848,11 +852,70 @@ function viewSettings() {
   };
   $('#notif-on').onclick = enableNotifications;
   $('#open-dict').onclick = () => { state.tab = 'dict'; render(); window.scrollTo(0, 0); };
+  wireAiCard();
   $('#stt').querySelectorAll('[data-stt]').forEach((b) => {
     b.onclick = () => { localStorage.setItem('dd_stt', b.dataset.stt); toast(b.dataset.stt === 'whisper' ? 'Using Whisper' : 'Using phone speech'); viewSettings(); };
   });
   $('#install').onclick = async () => { if (installPrompt) { installPrompt.prompt(); installPrompt = null; } };
   $('#logout').onclick = async () => { await api('/logout', { method: 'POST' }).catch(() => {}); renderLogin(); };
+}
+
+// "AI for voice" card: paste a free Gemini key from the phone; it's checked with Google,
+// encrypted on the server and never shown again (only its last 4 characters).
+function aiCard() {
+  const ai = state.ai || {};
+  const status = ai.provider === 'gemini'
+    ? (ai.source === 'cloudflare'
+      ? `✓ On: Gemini, using the key set in Cloudflare (${esc(ai.hint)})`
+      : `✓ On: Gemini key saved (${esc(ai.hint)})`)
+    : ai.provider === 'claude' ? '✓ On: Claude (key set in Cloudflare)'
+      : 'Off: voice recording works, but turning it into Do’s needs a free Gemini key.';
+  const canEdit = !(ai.provider === 'gemini' && ai.source === 'cloudflare');
+  return `<div class="card" id="ai-card">
+    <b>✨ AI for voice → Do’s</b>
+    <div class="small ${ai.provider ? '' : 'overdue'}" style="margin-top:4px">${status}</div>
+    ${canEdit ? `
+      <ol class="small muted" style="padding-left:18px;margin:10px 0 6px">
+        <li>Open <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">aistudio.google.com/apikey</a> and tap <b>Create API key</b>. It’s free.</li>
+        <li>Copy the key and paste it here.</li>
+      </ol>
+      <div class="row">
+        <input type="password" id="gkey" class="grow" style="flex:1;width:auto" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="${ai.provider === 'gemini' ? 'Paste a new key to replace it' : 'Paste your Gemini API key'}">
+        <button type="button" class="btn sm primary" id="gkey-save">Save</button>
+      </div>
+      ${ai.provider === 'gemini' ? '<button type="button" class="link small" id="gkey-remove" style="margin-top:8px">Remove saved key</button>' : ''}
+      <p class="muted small" style="margin-top:8px">Checked with Google, then stored encrypted. On Google’s free tier, what you say may be used to improve their products.</p>` : ''}
+  </div>`;
+}
+
+function wireAiCard() {
+  const save = $('#gkey-save');
+  if (save) {
+    save.onclick = async () => {
+      const key = $('#gkey').value.trim();
+      if (!key) return toast('Paste the key first');
+      save.disabled = true; save.textContent = 'Checking…';
+      try {
+        const r = await api('/settings', { method: 'PUT', body: { gemini_api_key: key } });
+        state.ai = r.ai;
+        toast('✨ Key checked with Google and saved');
+        viewSettings();
+      } catch (e) {
+        toast(e.message);
+        save.disabled = false; save.textContent = 'Save';
+      }
+    };
+  }
+  const rm = $('#gkey-remove');
+  if (rm) {
+    rm.onclick = async () => {
+      if (rm.dataset.armed !== '1') { rm.dataset.armed = '1'; rm.textContent = 'Tap again to remove'; return; }
+      const r = await api('/settings', { method: 'PUT', body: { gemini_api_key: '' } });
+      state.ai = r.ai;
+      toast('Key removed');
+      viewSettings();
+    };
+  }
 }
 
 function memberRow(m) {
@@ -910,6 +973,7 @@ function viewVoice() {
     </div><div class="talk-right">
     <label>Transcript <span class="muted">(edit anything it mis-heard — or type / use your keyboard's mic)</span></label>
     <textarea id="tx" rows="7" placeholder="e.g. &quot;The kitchen faucet is dripping again, and can you put the Christmas lights up before the party on the 14th, oh and the smoke detector in the hallway keeps chirping…&quot;">${esc(voice.transcript + (voice.interim ? ' ' + voice.interim : ''))}</textarea>
+    ${state.ai?.provider ? '' : '<p class="small overdue" style="margin:6px 0 0">✨ Turning this into Do’s is off until a free Gemini key is added in ⚙︎ Settings.</p>'}
     <p class="small" style="margin:6px 0 0"><button class="link small" id="teach">📖 Teach it a name or phrase</button> <span class="muted">· ${state.dictionary.length} known</span></p>
     ${isFixer() ? `<label>Who asked?</label><select id="reqr">${state.members.map((m) => `<option ${m.name === voice.requester ? 'selected' : ''}>${esc(m.name)}</option>`).join('')}</select>` : ''}
     <div class="row" style="margin-top:12px">
