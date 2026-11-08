@@ -308,16 +308,17 @@ async function patch(id, body, msg) {
 
 async function boot() {
   try {
-    const st = await fetch('/api/auth/status', { credentials: 'same-origin' }).then((r) => r.json());
     const params = new URLSearchParams(location.search);
     const invite = params.get('invite');
-    if (invite && !st.authed) return renderJoin(invite);
-    if (st.setup_needed) return renderSetup();
-    if (!st.authed) return renderLogin();
-    if (invite) { history.replaceState(null, '', '/'); toast('You’re already signed in on this phone'); }
+    if (invite) { localStorage.setItem('dd_invite', invite); history.replaceState(null, '', '/'); }
+    const st = await fetch('/api/auth/status', { credentials: 'same-origin' }).then((r) => r.json());
+    if (!st.authed) return localStorage.getItem('dd_invite') ? renderSignup() : renderLogin();
     state.user = st.user;
     state.me = st.user.name;
     localStorage.setItem('dd_me', state.me);
+    if (!st.user.linked) return renderLink();
+    localStorage.removeItem('dd_invite');
+    clearInterval(linkPoll);
     const settings = await api('/settings');
     state.members = settings.members;
     state.capacity = settings.capacity_min;
@@ -333,7 +334,7 @@ async function boot() {
   }
 }
 
-// ---------- accounts: sign in, first-time setup, join by invite, reset ----------
+// ---------- accounts: sign up, sign in, link with your partner, reset ----------
 
 function authShell(inner) {
   $('#tabs').hidden = true;
@@ -343,15 +344,16 @@ function authShell(inner) {
   app.innerHTML = `<div class="card auth">${inner}</div>`;
 }
 
-async function authPost(path, body, errEl) {
+async function authPost(path, body, errEl, btn) {
+  if (btn) btn.disabled = true;
   try {
     await api(path, { method: 'POST', body });
-    history.replaceState(null, '', '/');
     state.tab = '';
     state.lastNotifId = 0;
     boot();
   } catch (e) {
     errEl.textContent = e.message;
+    if (btn) btn.disabled = false;
   }
 }
 
@@ -374,87 +376,52 @@ function renderLogin(err = '') {
   authShell(`
     <h2>Sign in</h2>
     <form id="auth-f">
-      <label for="a-user">Username</label>
-      <input type="text" id="a-user" autocomplete="username" autocapitalize="off" spellcheck="false" required>
+      <label for="a-email">Email</label>
+      <input type="email" id="a-email" autocomplete="email" autocapitalize="off" spellcheck="false" required>
       <label for="a-pass">Password</label>
       <input type="password" id="a-pass" autocomplete="current-password" required>
       <p class="small err" id="a-err">${esc(err)}</p>
       <button class="btn primary block">Sign in</button>
     </form>
-    <p class="small muted" style="margin-top:14px">New here? Ask your partner to send you an invite link from ⚙︎ Settings → Household.</p>
-    <p class="small"><button class="link small" id="a-reset">Forgot your password? Use a reset code</button></p>`);
+    <button type="button" class="btn block" id="a-new" style="margin-top:10px">Create an account</button>
+    <p class="small" style="margin-top:12px"><button class="link small" id="a-reset">Forgot your password? Use a reset code</button></p>`);
   $('#auth-f').onsubmit = (e) => {
     e.preventDefault();
-    authPost('/auth/login', { username: $('#a-user').value, password: $('#a-pass').value }, $('#a-err'));
+    authPost('/auth/login', { email: $('#a-email').value, password: $('#a-pass').value }, $('#a-err'), e.submitter);
   };
+  $('#a-new').onclick = () => renderSignup();
   $('#a-reset').onclick = () => renderReset();
 }
 
-function renderSetup() {
-  const f = { role: 'fixer' };
+async function renderSignup() {
+  const code = localStorage.getItem('dd_invite');
+  let inv = null;
+  if (code) { try { inv = await api(`/auth/invite/${encodeURIComponent(code)}`); } catch { localStorage.removeItem('dd_invite'); } }
+  const f = { role: inv ? 'requester' : 'fixer' };
   authShell(`
-    <h2>Set up your household</h2>
-    <p class="muted small">First time only. Create your account, then invite your partner from Settings to link your accounts.</p>
+    <h2>${inv ? `${esc(inv.from_name)} invited you to Daddy-Do` : 'Create your account'}</h2>
+    <p class="muted small">${inv
+      ? 'Make your account, then you’ll be linked to share your household’s Do list.'
+      : 'Each of you makes your own account. Then one of you invites the other by email to link up.'}</p>
     <form id="auth-f">
-      <label for="a-pin">Household passphrase <span class="muted">(capitals and spaces don’t matter)</span></label>
-      <div class="row" style="flex-wrap:nowrap">
-        <input type="password" id="a-pin" class="grow" style="flex:1;width:auto" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" required>
-        <button type="button" class="btn sm" id="a-pin-show">Show</button>
-      </div>
       <label for="a-name">Your name <span class="muted">(shown on Do’s)</span></label>
-      <input type="text" id="a-name" maxlength="40" placeholder="Dad" required>
+      <input type="text" id="a-name" maxlength="40" placeholder="${inv ? 'Mom' : 'Dad'}" required>
       <label>You are…</label>
-      ${roleChips('fixer')}
-      <label for="a-user">Username</label>
-      <input type="text" id="a-user" autocomplete="username" autocapitalize="off" spellcheck="false" placeholder="e.g. griffin or your email" required>
+      ${roleChips(f.role)}
+      <label for="a-email">Email</label>
+      <input type="email" id="a-email" autocomplete="email" autocapitalize="off" spellcheck="false" value="${esc(inv?.to_email || '')}" required>
       <label for="a-pass">Password <span class="muted">(8+ characters)</span></label>
       <input type="password" id="a-pass" autocomplete="new-password" minlength="8" required>
       <p class="small err" id="a-err"></p>
-      <button class="btn primary block">Create my account</button>
-    </form>`);
+      <button class="btn primary block">Create account</button>
+    </form>
+    <p class="small" style="margin-top:12px"><button class="link small" id="a-have">Already have an account? Sign in</button></p>`);
   wireRoleChips(f);
-  $('#a-pin-show').onclick = (e) => {
-    const i = $('#a-pin');
-    i.type = i.type === 'password' ? 'text' : 'password';
-    e.currentTarget.textContent = i.type === 'password' ? 'Show' : 'Hide';
-  };
   $('#auth-f').onsubmit = (e) => {
     e.preventDefault();
-    authPost('/auth/setup', {
-      pin: $('#a-pin').value, name: $('#a-name').value, role: f.role, username: $('#a-user').value, password: $('#a-pass').value,
-    }, $('#a-err'));
+    authPost('/auth/signup', { name: $('#a-name').value, role: f.role, email: $('#a-email').value, password: $('#a-pass').value }, $('#a-err'), e.submitter);
   };
-}
-
-async function renderJoin(code) {
-  authShell('<p class="muted">Checking your invite…</p>');
-  let info;
-  try {
-    info = await api(`/auth/invite/${encodeURIComponent(code)}`);
-  } catch (e) {
-    authShell(`<h2>Invite link</h2><p class="small err">${esc(e.message)}</p>
-      <button class="btn block" id="a-signin">Sign in instead</button>`);
-    $('#a-signin').onclick = () => { history.replaceState(null, '', '/'); renderLogin(); };
-    return;
-  }
-  authShell(`
-    <h2>Join ${esc(info.invited_by)} on Daddy-Do</h2>
-    <p class="muted small">${esc(info.invited_by)} invited you to share your household’s Do list.
-      You’ll join as someone who ${info.role === 'fixer' ? '<b>does the Do’s</b>' : '<b>asks for Do’s</b>'}.</p>
-    <form id="auth-f">
-      <label for="a-name">Your name <span class="muted">(shown on Do’s)</span></label>
-      <input type="text" id="a-name" maxlength="40" value="${esc(info.name_hint || '')}" placeholder="Mom" required>
-      <label for="a-user">Pick a username</label>
-      <input type="text" id="a-user" autocomplete="username" autocapitalize="off" spellcheck="false" required>
-      <label for="a-pass">Pick a password <span class="muted">(8+ characters)</span></label>
-      <input type="password" id="a-pass" autocomplete="new-password" minlength="8" required>
-      <p class="small err" id="a-err"></p>
-      <button class="btn primary block">Join the household</button>
-    </form>`);
-  $('#auth-f').onsubmit = (e) => {
-    e.preventDefault();
-    authPost('/auth/join', { code, name: $('#a-name').value, username: $('#a-user').value, password: $('#a-pass').value }, $('#a-err'));
-  };
+  $('#a-have').onclick = () => renderLogin();
 }
 
 function renderReset() {
@@ -472,9 +439,129 @@ function renderReset() {
     <p class="small"><button class="link small" id="a-back">← Back to sign in</button></p>`);
   $('#auth-f').onsubmit = (e) => {
     e.preventDefault();
-    authPost('/auth/reset', { code: $('#a-code').value, password: $('#a-pass').value }, $('#a-err'));
+    authPost('/auth/reset', { code: $('#a-code').value, password: $('#a-pass').value }, $('#a-err'), e.submitter);
   };
   $('#a-back').onclick = () => renderLogin();
+}
+
+// Shown after sign-in until the two accounts are linked.
+let linkPoll = null;
+async function renderLink(msg = '') {
+  let L;
+  try { L = await api('/auth/link'); } catch (e) { return authShell(`<p class="err">${esc(e.message)}</p>`); }
+  const code = localStorage.getItem('dd_invite');
+  let codeInv = null;
+  if (code) { try { codeInv = await api(`/auth/invite/${encodeURIComponent(code)}`); } catch { localStorage.removeItem('dd_invite'); } }
+  const me = L.user;
+  const incoming = L.invites_for_me.map((i) => ({ ...i, kind: 'id' }));
+  if (codeInv && !incoming.some((i) => i.from_name === codeInv.from_name)) incoming.unshift({ kind: 'code', from_name: codeInv.from_name, from_email: '' });
+  authShell(`
+    <h2>Link with your partner</h2>
+    <p class="muted small">Signed in as <b>${esc(me.name)}</b> · ${esc(me.email)}. Daddy-Do opens once you’re linked.</p>
+    ${msg ? `<p class="small err">${esc(msg)}</p>` : ''}
+    ${incoming.map((i, n) => `
+      <div class="card invite-card">
+        <b>💌 ${esc(i.from_name)} invited you</b>${i.from_email ? `<div class="small muted">${esc(i.from_email)}</div>` : ''}
+        <div class="row" style="margin-top:10px">
+          <button type="button" class="btn primary" data-accept="${n}">Accept and link</button>
+          ${i.kind === 'id' ? `<button type="button" class="btn" data-decline="${n}">Decline</button>` : ''}
+        </div>
+      </div>`).join('')}
+    <div id="rename"></div>
+    ${incoming.length ? '<h3>Or invite them</h3>' : ''}
+    <div id="invite-box"></div>
+    ${L.sent.length ? `<h3>Waiting for</h3>${L.sent.map((s) => `
+      <div class="dict-row"><div class="grow" style="min-width:0"><b>${esc(s.to_email)}</b>
+        <div class="small muted">Invite sent · this screen opens the app as soon as they accept</div></div>
+        <button type="button" class="btn sm" data-resend="${esc(s.to_email)}">Resend</button>
+        <button type="button" class="btn sm danger" data-cancel="${s.id}" aria-label="Cancel invite to ${esc(s.to_email)}">✕</button></div>`).join('')}` : ''}
+    <p class="small" style="margin-top:16px"><button class="link small" id="a-out">Sign out</button></p>`);
+  inviteForm($('#invite-box'));
+  app.querySelectorAll('[data-accept]').forEach((b) => {
+    b.onclick = async () => {
+      const i = incoming[+b.dataset.accept];
+      b.disabled = true;
+      try {
+        await api('/auth/accept', { method: 'POST', body: i.kind === 'code' ? { code } : { invite_id: i.id } });
+        localStorage.removeItem('dd_invite');
+        toast(`🎉 Linked with ${i.from_name}`);
+        boot();
+      } catch (e) {
+        b.disabled = false;
+        if (/already has someone called/.test(e.message)) return renameThenAccept(e.message);
+        toast(e.message);
+      }
+    };
+  });
+  app.querySelectorAll('[data-decline]').forEach((b) => {
+    b.onclick = async () => { await api('/auth/decline', { method: 'POST', body: { invite_id: incoming[+b.dataset.decline].id } }); renderLink(); };
+  });
+  app.querySelectorAll('[data-cancel]').forEach((b) => {
+    b.onclick = async () => { await api(`/auth/invite/${b.dataset.cancel}/cancel`, { method: 'POST' }); renderLink(); };
+  });
+  app.querySelectorAll('[data-resend]').forEach((b) => {
+    b.onclick = () => { $('#inv-email').value = b.dataset.resend; $('#inv-send').click(); };
+  });
+  $('#a-out').onclick = async () => { await api('/auth/logout', { method: 'POST' }).catch(() => {}); clearInterval(linkPoll); renderLogin(); };
+  // Move on by ourselves when the other person accepts.
+  clearInterval(linkPoll);
+  linkPoll = setInterval(async () => {
+    if (document.hidden || app.contains(document.activeElement) && document.activeElement.matches('input')) return;
+    const st = await fetch('/api/auth/status', { credentials: 'same-origin' }).then((r) => r.json()).catch(() => null);
+    if (st?.user?.linked) { clearInterval(linkPoll); toast('🎉 You’re linked!'); boot(); }
+  }, 8000);
+}
+
+function renameThenAccept(message) {
+  $('#rename').innerHTML = `<div class="card"><p class="small err">${esc(message)}</p>
+    <form id="rn" class="row"><input type="text" id="rn-name" maxlength="40" class="grow" style="flex:1;width:auto" placeholder="e.g. Sarah" required>
+    <button class="btn primary">Save name</button></form></div>`;
+  $('#rn').onsubmit = async (e) => {
+    e.preventDefault();
+    try { await api('/auth/me', { method: 'PATCH', body: { name: $('#rn-name').value } }); renderLink('Name updated. Tap Accept again.'); } catch (er) { toast(er.message); }
+  };
+}
+
+// Invite by email: the invite is tied to their address; we hand the link to the phone's
+// email app (or share sheet) so it goes out from your own email.
+function inviteForm(box) {
+  box.innerHTML = `
+    <form id="inv-f" class="card">
+      <label for="inv-email" style="margin-top:0">Your partner’s email</label>
+      <input type="email" id="inv-email" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="name@example.com" required>
+      <button class="btn primary block" id="inv-send" style="margin-top:10px">Send invite</button>
+      <div id="inv-out"></div>
+    </form>`;
+  $('#inv-f').onsubmit = async (e) => {
+    e.preventDefault();
+    const btn = $('#inv-send');
+    btn.disabled = true;
+    try {
+      const r = await api('/auth/invite', { method: 'POST', body: { email: $('#inv-email').value } });
+      const subject = `${r.from_name} invited you to Daddy-Do`;
+      const text = `${r.from_name} invited you to link up on Daddy-Do, our household Do list.\n\nOpen this link to ${r.has_account ? 'sign in and accept' : 'create your account and link up'}:\n${r.url}\n\nUse this email address: ${r.to_email}`;
+      const mailto = `mailto:${encodeURIComponent(r.to_email)}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(text)}`;
+      $('#inv-out').innerHTML = `<div class="card code-card">
+        <div class="small">Invite for <b>${esc(r.to_email)}</b> is ready (valid 14 days). ${r.has_account
+          ? 'They already have an account; it’ll be waiting when they sign in.'
+          : 'Send it so they can sign up with that email.'}</div>
+        <div class="row" style="margin-top:8px">
+          <a class="btn sm primary" href="${esc(mailto)}" id="inv-mail">✉️ Email it</a>
+          ${navigator.share ? '<button type="button" class="btn sm" id="inv-share">Share…</button>' : ''}
+          <button type="button" class="btn sm" id="inv-copy">Copy link</button>
+        </div></div>`;
+      const sh = $('#inv-share');
+      if (sh) sh.onclick = () => navigator.share({ title: subject, text, url: r.url }).catch(() => {});
+      $('#inv-copy').onclick = async () => {
+        try { await navigator.clipboard.writeText(r.url); toast('Link copied'); } catch { toast('Press and hold the link to copy it'); }
+      };
+      btn.disabled = false;
+      btn.textContent = 'Send another';
+    } catch (er) {
+      toast(er.message);
+      btn.disabled = false;
+    }
+  };
 }
 
 // ---------- layout ----------
@@ -1019,11 +1106,12 @@ async function loadHousehold() {
     <div style="margin-top:6px">${list.map((u) => `
       <div class="dict-row">
         <div class="grow" style="min-width:0"><b>${esc(u.name)}</b>${u.you ? ' <span class="muted small">(you)</span>' : ''}
-          <div class="small muted">@${esc(u.username)} · ${u.role === 'fixer' ? 'does the Do’s' : 'asks for Do’s'}</div></div>
-        ${u.you ? '' : `<button type="button" class="btn sm" data-reset="${u.id}" data-name="${esc(u.name)}">Reset code</button>`}
+          <div class="small muted">${esc(u.email)} · ${u.role === 'fixer' ? 'does the Do’s' : 'asks for Do’s'}</div></div>
+        ${u.you ? '' : `<button type="button" class="btn sm" data-reset="${u.id}">Reset code</button>`}
       </div>`).join('')}</div>
     <div id="code-out"></div>
-    <button type="button" class="btn primary block" id="invite" style="margin-top:10px">➕ Invite someone to link their account</button>`;
+    <details style="margin-top:10px"><summary class="small">➕ Invite someone else to the household</summary><div id="hh-invite"></div></details>`;
+  inviteForm($('#hh-invite'));
   box.querySelectorAll('[data-reset]').forEach((b) => {
     b.onclick = async () => {
       try {
@@ -1034,31 +1122,13 @@ async function loadHousehold() {
       } catch (e) { toast(e.message); }
     };
   });
-  $('#invite').onclick = async () => {
-    try {
-      const r = await api('/auth/invite', { method: 'POST', body: {} });
-      const msg = `Join me on Daddy-Do, our household Do list: ${r.url}`;
-      $('#code-out').innerHTML = `<div class="card code-card">
-        <div class="small">Send this link. It works once, for 7 days, and links their account to yours as someone who ${r.role === 'fixer' ? 'does the Do’s' : 'asks for Do’s'}.</div>
-        <div class="code small" style="word-break:break-all">${esc(r.url)}</div>
-        <div class="row">
-          ${navigator.share ? '<button type="button" class="btn sm primary" id="inv-share">Share…</button>' : ''}
-          <button type="button" class="btn sm" id="inv-copy">Copy link</button>
-        </div></div>`;
-      const sh = $('#inv-share');
-      if (sh) sh.onclick = () => navigator.share({ title: 'Daddy-Do', text: msg, url: r.url }).catch(() => {});
-      $('#inv-copy').onclick = async () => {
-        try { await navigator.clipboard.writeText(r.url); toast('Link copied'); } catch { toast('Press and hold the link to copy it'); }
-      };
-    } catch (e) { toast(e.message); }
-  };
 }
 
 // ---- Settings → Your account ----
 function accountCard() {
   const u = state.user || {};
   return `<form class="card" id="acct">
-    <b>🙂 Your account</b> <span class="muted small">@${esc(u.username || '')}</span>
+    <b>🙂 Your account</b> <span class="muted small">${esc(u.email || '')}</span>
     <label for="ac-name">Your name <span class="muted">(shown on Do’s)</span></label>
     <input type="text" id="ac-name" maxlength="40" value="${esc(u.name || '')}">
     <label>You are…</label>

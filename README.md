@@ -38,21 +38,22 @@ She files ─► New ─► (you triage: size + priority) ─► Backlog ─► 
 ## 🚀 Live
 
 - **Site:** https://daddy-do.pages.dev. Cloudflare Pages is connected to this repo, so every push to `main` builds (`npm install`) and deploys `public/` and `functions/`.
-- **Database:** D1 `daddy-do` (`a5154034-cd1a-4b29-8093-fd512e6f2145`), plus the Workers AI binding `AI`. Both are defined in `wrangler.toml`.
-- **Secrets (Pages → Settings → Variables and secrets):** `HOUSEHOLD_PIN` and `SESSION_SECRET`.
+- **Database:** D1 `daddy-do-v2` (`456fb358-1ca0-4e98-b86b-7ef37107c3a7`, schema v2 with households), plus the Workers AI binding `AI`. Both are defined in `wrangler.toml`. The original `daddy-do` D1 is unused and empty apart from defaults, so it can be deleted.
+- **Secrets (Pages → Settings → Variables and secrets):** `SESSION_SECRET`. `HOUSEHOLD_PIN` is no longer used.
 - **Gemini key:** paste it in the app under **⚙︎ Settings → AI for voice**, which works from a phone. It's checked with Google, then stored AES-GCM-encrypted in D1 (`settings.gemini_key_enc`, using a key derived from `SESSION_SECRET`), and only its last 4 characters are ever shown. A `GEMINI_API_KEY` Cloudflare secret, if set, takes priority. Without any AI key, voice-to-Do's parsing is turned off.
 - **AI provider:** Google **Gemini** (`gemini-3.6-flash`, free tier) is used when `GEMINI_API_KEY` is set. You can override the model with a `GEMINI_MODEL` variable. If only `ANTHROPIC_API_KEY` is set, Claude is used instead. Both providers get the same prompt and JSON schema. On Gemini's free tier, Google may use prompts to improve its products.
 - **Android app:** https://daddy-do.pages.dev/download/daddy-do.apk (⚙︎ Settings shows a download card on Android). See `android/README.md`.
 
-## 👨‍👩‍👧 Accounts
+## 👨‍👩‍👧 Accounts & linking
 
-- **One site = one household.** Each person has their own username and password, and the server knows who's signed in through a signed, HttpOnly session cookie (180 days). Every action is attributed to the signed-in account; the phone can't claim to be someone else.
-- **First-time setup:** the first person enters the old household passphrase (`HOUSEHOLD_PIN`) once, which proves they belong, then creates their account.
-- **Linking:** ⚙︎ Settings → Household → **Invite** makes a one-time link (valid 7 days) to text your partner. Opening it shows "Join … on Daddy-Do", and on Android it opens in the app.
-- **Forgot password:** the other member taps **Reset code** next to your name (one use, 24 hours). Enter it on the sign-in screen with a new password; that also signs out your other devices.
-- **Security:** PBKDF2-SHA256 passwords (100k iterations), lockout after 8 wrong tries for 15 minutes, invite and reset codes stored hashed. Changing your password or tapping "Sign out on all devices" ends every other session.
-- **Renaming** yourself in Settings → Your account updates your name on every Do, comment, notification and points entry.
-- API: `/api/auth/*`, see `functions/api/auth/[[path]].js`. Tables `users` and `codes` come from `migrations/003_accounts.sql`.
+- **Each person signs up** with an email, password, name and "I do / I ask for Do's". There's no shared passphrase.
+- **Linking:** one of you enters the other's email on the **Link with your partner** screen and taps **Send invite**. **✉️ Email it** opens your phone's email app with the link filled in; **Share…** and **Copy link** also work. The invite is tied to that email and lasts 14 days.
+- **Accepting:** the partner signs up or signs in with that email and taps **Accept and link**. Opening the invite link also works, even with a different email. The waiting screen opens the app on its own once they accept.
+- **Until linked**, neither account can see or create Do's: the API answers `403 not_linked`. It's one household per account, up to 6 people.
+- **Multi-household:** every row carries `household_id` and every query is scoped to the signed-in member's household, so households never see each other's data.
+- **Forgot password:** the other member taps **Reset code** next to your name (one use, 24 hours), and you enter it on the sign-in screen. Password changes and resets sign out your other devices.
+- **Security:** PBKDF2-SHA256 passwords, signed HttpOnly session cookies, lockout after 8 wrong tries for 15 minutes, and invite and reset codes stored hashed.
+- **Code:** `functions/api/auth/[[path]].js` for the endpoints, `functions/api/_middleware.js` for the session and linking gate, `lib/auth.js` and `lib/household.js` for the helpers.
 
 ## 📱 Phones, foldables and tablets
 

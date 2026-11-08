@@ -4,8 +4,8 @@ pages_build_output_dir = "public"
 
 [[d1_databases]]
 binding = "DB"
-database_name = "daddy-do"
-database_id = "a5154034-cd1a-4b29-8093-fd512e6f2145"
+database_name = "daddy-do-v2"
+database_id = "456fb358-1ca0-4e98-b86b-7ef37107c3a7"
 
 # Workers AI — Whisper speech-to-text fallback for /api/transcribe
 [ai]

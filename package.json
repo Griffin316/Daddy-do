@@ -5,8 +5,8 @@
   "type": "module",
   "description": "A ticketing system for household chores",
   "scripts": {
-    "db:init:local": "wrangler d1 execute daddy-do --local --file=schema.sql",
-    "db:init:remote": "wrangler d1 execute daddy-do --remote --file=schema.sql",
+    "db:init:local": "wrangler d1 execute daddy-do-v2 --local --file=schema.sql",
+    "db:init:remote": "wrangler d1 execute daddy-do-v2 --remote --file=schema.sql",
     "dev": "wrangler pages dev",
     "deploy": "wrangler pages deploy"
   },

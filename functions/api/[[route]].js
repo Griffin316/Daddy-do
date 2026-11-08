@@ -1,8 +1,10 @@
 import { cleanDictionary, readDictionary } from '../../lib/dictionary.js';
 import { encryptSecret, geminiKey, keyHint } from '../../lib/secrets.js';
+import { getMembers, getSettingsMap } from '../../lib/household.js';
 
 // Daddy-Do REST API (Cloudflare Pages Function, D1 binding "DB").
-// Auth is handled by _middleware.js. The acting user's name comes in X-User.
+// _middleware.js signs the member in and only lets linked households through; every query
+// here is scoped to that member's household (H.hh). The acting person is the account.
 
 const STATUSES = ['new', 'backlog', 'scheduled', 'in_progress', 'blocked', 'resolved', 'closed'];
 const OPEN_STATUSES = ['new', 'backlog', 'scheduled', 'in_progress', 'blocked'];
@@ -29,9 +31,6 @@ function basePoints(t) {
 const json = (data, status = 200) =>
   new Response(JSON.stringify(data), { status, headers: { 'content-type': 'application/json' } });
 const bad = (msg, status = 400) => json({ error: msg }, status);
-
-// The acting person is the signed-in account (set by _middleware.js), never a client header.
-const actorOf = (data) => data.user?.name || 'Someone';
 
 function addDays(dateStr, days) {
   const d = dateStr ? new Date(dateStr + 'T00:00:00Z') : new Date();
@@ -92,19 +91,12 @@ function clean(field, value) {
   }
 }
 
-async function audit(db, ticketId, author, body) {
-  await db.prepare('INSERT INTO comments (ticket_id, author, body, is_system) VALUES (?, ?, ?, 1)')
-    .bind(ticketId, author, body).run();
+async function audit(H, ticketId, author, body) {
+  await H.db.prepare('INSERT INTO comments (household_id, ticket_id, author, body, is_system) VALUES (?, ?, ?, ?, 1)')
+    .bind(H.hh, ticketId, author, body).run();
 }
 
-async function getTicket(db, id) {
-  return db.prepare('SELECT * FROM tickets WHERE id = ?').bind(id).first();
-}
-
-async function getMembers(db) {
-  const s = await db.prepare("SELECT value FROM settings WHERE key = 'members'").first();
-  return JSON.parse(s?.value || '[]');
-}
+const getTicket = (H, id) => H.db.prepare('SELECT * FROM tickets WHERE id = ? AND household_id = ?').bind(id, H.hh).first();
 
 // Who should hear about something `actor` did on ticket `t`?
 // Fixer updates go to the requester; requester activity goes to the fixers.
@@ -118,11 +110,11 @@ function recipientsFor(t, actor, members) {
   return [...out];
 }
 
-async function notify(db, recipients, ticketId, actor, kind, body) {
+async function notify(H, recipients, ticketId, actor, kind, body) {
   if (!recipients.length) return;
-  await db.batch(recipients.map((r) => db.prepare(
-    'INSERT INTO notifications (recipient, ticket_id, actor, kind, body) VALUES (?, ?, ?, ?, ?)',
-  ).bind(r, ticketId, actor, kind, body.slice(0, 500))));
+  await H.db.batch(recipients.map((r) => H.db.prepare(
+    'INSERT INTO notifications (household_id, recipient, ticket_id, actor, kind, body) VALUES (?, ?, ?, ?, ?, ?)',
+  ).bind(H.hh, r, ticketId, actor, kind, body.slice(0, 500))));
 }
 
 // ---------- tickets ----------
@@ -133,18 +125,18 @@ const LIST_COLUMNS = `t.*,
      ORDER BY c.id DESC LIMIT 1) AS last_update,
   (SELECT COALESCE(SUM(p.points), 0) FROM points p WHERE p.ticket_id = t.id AND p.points > 0) AS points_earned`;
 
-async function listTickets(db, url) {
+async function listTickets(H, url) {
   const includeClosed = url.searchParams.get('closed') === '1';
   const sql = includeClosed
-    ? `SELECT ${LIST_COLUMNS} FROM tickets t ORDER BY t.id DESC LIMIT 1000`
+    ? `SELECT ${LIST_COLUMNS} FROM tickets t WHERE t.household_id = ? ORDER BY t.id DESC LIMIT 1000`
     : `SELECT ${LIST_COLUMNS} FROM tickets t
-       WHERE t.status != 'closed' OR t.closed_at >= datetime('now', '-30 days')
+       WHERE t.household_id = ? AND (t.status != 'closed' OR t.closed_at >= datetime('now', '-30 days'))
        ORDER BY t.id DESC`;
-  const { results } = await db.prepare(sql).all();
+  const { results } = await H.db.prepare(sql).bind(H.hh).all();
   return json({ tickets: results });
 }
 
-async function createTicket(db, request, actor) {
+async function createTicket(H, request, actor) {
   const body = await request.json().catch(() => ({}));
   const t = {
     title: clean('title', body.title),
@@ -157,57 +149,56 @@ async function createTicket(db, request, actor) {
     assignee: clean('assignee', body.assignee ?? ''),
     recur_days: clean('recur_days', body.recur_days ?? 0),
   };
-  const members = await getMembers(db);
+  const members = await getMembers(H.db, H.hh);
   // Allow filing on behalf of another household member (e.g. Dad captures what Mom asked for).
   let requester = actor;
   if (body.requester && members.some((m) => m.name === String(body.requester))) requester = String(body.requester);
 
-  const row = await db.prepare(
-    `INSERT INTO tickets (title, description, requester, priority, category, location, due_date,
+  const row = await H.db.prepare(
+    `INSERT INTO tickets (household_id, title, description, requester, priority, category, location, due_date,
                           estimate_min, assignee, recur_days)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *`,
-  ).bind(t.title, t.description, requester, t.priority, t.category, t.location, t.due_date,
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *`,
+  ).bind(H.hh, t.title, t.description, requester, t.priority, t.category, t.location, t.due_date,
     t.estimate_min, t.assignee, t.recur_days).first();
-  await audit(db, row.id, actor, requester === actor ? 'Added this Do' : `Added this Do for ${requester}`);
+  await audit(H, row.id, actor, requester === actor ? 'Added this Do' : `Added this Do for ${requester}`);
   if (requester === actor) {
     // Let the fixer(s) know a new request arrived.
     const fixers = members.filter((m) => m.role === 'fixer' && m.name !== actor).map((m) => m.name);
-    await notify(db, fixers, row.id, actor, 'new', `New P${row.priority} request: ${row.title}`);
+    await notify(H, fixers, row.id, actor, 'new', `New P${row.priority} request: ${row.title}`);
   }
   return json({ ticket: row }, 201);
 }
 
-async function awardCompletion(db, t, actor, members) {
-  const already = await db.prepare(
-    "SELECT 1 FROM points WHERE ticket_id = ? AND kind = 'complete'",
-  ).bind(t.id).first();
+async function awardCompletion(H, t, actor, members) {
+  const already = await H.db.prepare(
+    "SELECT 1 FROM points WHERE household_id = ? AND ticket_id = ? AND kind = 'complete'",
+  ).bind(H.hh, t.id).first();
   if (already) return null;
   const actorIsFixer = members.some((m) => m.name === actor && m.role === 'fixer');
   const earner = actorIsFixer ? actor
     : (t.assignee || members.find((m) => m.role === 'fixer')?.name || actor);
   const base = basePoints(t);
-  const stmts = [db.prepare(
-    "INSERT INTO points (member, ticket_id, kind, points, note) VALUES (?, ?, 'complete', ?, ?)",
-  ).bind(earner, t.id, base, t.title)];
+  const ins = (kind, pts, note) => H.db.prepare(
+    'INSERT INTO points (household_id, member, ticket_id, kind, points, note) VALUES (?, ?, ?, ?, ?, ?)',
+  ).bind(H.hh, earner, t.id, kind, pts, note);
+  const stmts = [ins('complete', base, t.title)];
   let bonus = 0;
   const deadline = t.scheduled_for || t.due_date;
   const today = new Date().toISOString().slice(0, 10);
   if (deadline && today <= deadline) {
     bonus = Math.max(5, Math.round(base * 0.25));
-    stmts.push(db.prepare(
-      "INSERT INTO points (member, ticket_id, kind, points, note) VALUES (?, ?, 'ontime', ?, ?)",
-    ).bind(earner, t.id, bonus, 'On-time bonus'));
+    stmts.push(ins('ontime', bonus, 'On-time bonus'));
   }
-  await db.batch(stmts);
+  await H.db.batch(stmts);
   return { member: earner, points: base + bonus, base, bonus };
 }
 
-async function updateTicket(db, request, actor, id) {
-  const before = await getTicket(db, id);
+async function updateTicket(H, request, actor, id) {
+  const before = await getTicket(H, id);
   if (!before) return bad('Not found', 404);
   const body = await request.json().catch(() => ({}));
   const note = String(body.note || '').trim().slice(0, 2000);
-  const members = await getMembers(db);
+  const members = await getMembers(H.db, H.hh);
 
   // Scheduling a specific day also plans it into that week and marks it Scheduled.
   if (body.scheduled_for) {
@@ -241,8 +232,8 @@ async function updateTicket(db, request, actor, id) {
   }
   sets.push("updated_at = datetime('now')");
 
-  const after = await db.prepare(`UPDATE tickets SET ${sets.join(', ')} WHERE id = ? RETURNING *`)
-    .bind(...vals, id).first();
+  const after = await H.db.prepare(`UPDATE tickets SET ${sets.join(', ')} WHERE id = ? AND household_id = ? RETURNING *`)
+    .bind(...vals, id, H.hh).first();
 
   // Human-readable audit trail
   const notes = [];
@@ -260,31 +251,34 @@ async function updateTicket(db, request, actor, id) {
   if ('estimate_min' in changes) notes.push(`Estimate set to ${changes.estimate_min} min`);
   if ('assignee' in changes) notes.push(changes.assignee ? `Assigned to ${changes.assignee}` : 'Unassigned');
   if ('due_date' in changes) notes.push(changes.due_date ? `Due ${changes.due_date}` : 'Due date cleared');
-  if (notes.length) await audit(db, id, actor, notes.join(' · '));
+  if (notes.length) await audit(H, id, actor, notes.join(' · '));
   if (note) {
-    await db.prepare('INSERT INTO comments (ticket_id, author, body) VALUES (?, ?, ?)').bind(id, actor, note).run();
+    await H.db.prepare('INSERT INTO comments (household_id, ticket_id, author, body) VALUES (?, ?, ?, ?)')
+      .bind(H.hh, id, actor, note).run();
   }
 
   // ---- points ----
   let award = null;
   const nowDone = changes.status === 'resolved' || (changes.status === 'closed' && before.status !== 'new');
-  if (nowDone) award = await awardCompletion(db, after, actor, members);
+  if (nowDone) award = await awardCompletion(H, after, actor, members);
   if (changes.status === 'closed' && before.status === 'resolved' && actor === after.requester) {
-    const earned = await db.prepare(
-      "SELECT member FROM points WHERE ticket_id = ? AND kind = 'complete'",
-    ).bind(id).first();
-    const dup = await db.prepare("SELECT 1 FROM points WHERE ticket_id = ? AND kind = 'thanks'").bind(id).first();
+    const earned = await H.db.prepare(
+      "SELECT member FROM points WHERE household_id = ? AND ticket_id = ? AND kind = 'complete'",
+    ).bind(H.hh, id).first();
+    const dup = await H.db.prepare("SELECT 1 FROM points WHERE household_id = ? AND ticket_id = ? AND kind = 'thanks'")
+      .bind(H.hh, id).first();
     if (earned && !dup && earned.member !== actor) {
-      await db.prepare(
-        "INSERT INTO points (member, ticket_id, kind, points, note) VALUES (?, ?, 'thanks', ?, ?)",
-      ).bind(earned.member, id, THANKS_POINTS, `${actor} approved ✓`).run();
-      await notify(db, [earned.member], id, actor, 'points',
+      await H.db.prepare(
+        "INSERT INTO points (household_id, member, ticket_id, kind, points, note) VALUES (?, ?, ?, 'thanks', ?, ?)",
+      ).bind(H.hh, earned.member, id, THANKS_POINTS, `${actor} approved ✓`).run();
+      await notify(H, [earned.member], id, actor, 'points',
         `${actor} approved “${after.title}” ✓ +${THANKS_POINTS} pts`);
     }
   }
   if ('status' in changes && OPEN_STATUSES.includes(changes.status) && ['resolved', 'closed'].includes(before.status)) {
     // Reopened: take back the points; they'll be re-earned when it's really done.
-    await db.prepare("DELETE FROM points WHERE ticket_id = ? AND kind IN ('complete','ontime','thanks')").bind(id).run();
+    await H.db.prepare("DELETE FROM points WHERE household_id = ? AND ticket_id = ? AND kind IN ('complete','ontime','thanks')")
+      .bind(H.hh, id).run();
   }
 
   // ---- notifications ----
@@ -306,95 +300,90 @@ async function updateTicket(db, request, actor, id) {
   // Points/priority-only tweaks are noise; only notify on meaningful changes.
   const approvedOnly = changes.status === 'closed' && before.status === 'resolved' && !note; // "+10 pts" notice covers it
   const meaningful = !approvedOnly && (note || ['status', 'scheduled_for', 'scheduled_time', 'due_date', 'sprint_week'].some((f) => f in changes));
-  if (meaningful) await notify(db, recipients, id, actor, kind, msg);
+  if (meaningful) await notify(H, recipients, id, actor, kind, msg);
 
   // ---- recurring chores: closing spawns the next occurrence ----
   let spawned = null;
   if (changes.status === 'closed' && after.recur_days > 0) {
-    spawned = await db.prepare(
-      `INSERT INTO tickets (title, description, requester, assignee, priority, estimate_min, category,
+    spawned = await H.db.prepare(
+      `INSERT INTO tickets (household_id, title, description, requester, assignee, priority, estimate_min, category,
                             location, status, due_date, recur_days)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'backlog', ?, ?) RETURNING *`,
-    ).bind(after.title, after.description, after.requester, after.assignee, after.priority,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'backlog', ?, ?) RETURNING *`,
+    ).bind(H.hh, after.title, after.description, after.requester, after.assignee, after.priority,
       after.estimate_min, after.category, after.location,
       addDays(null, after.recur_days), after.recur_days).first();
-    await audit(db, spawned.id, actor, `Recurring chore — next occurrence of #${id}`);
-    await audit(db, id, actor, `Next occurrence created: #${spawned.id}`);
+    await audit(H, spawned.id, actor, `Recurring chore — next occurrence of #${id}`);
+    await audit(H, id, actor, `Next occurrence created: #${spawned.id}`);
   }
 
   return json({ ticket: after, spawned, award });
 }
 
-async function ticketDetail(db, id) {
-  const ticket = await getTicket(db, id);
+async function ticketDetail(H, id) {
+  const ticket = await getTicket(H, id);
   if (!ticket) return bad('Not found', 404);
-  const { results } = await db.prepare('SELECT * FROM comments WHERE ticket_id = ? ORDER BY id ASC')
-    .bind(id).all();
-  const pts = await db.prepare('SELECT * FROM points WHERE ticket_id = ? ORDER BY id').bind(id).all();
+  const { results } = await H.db.prepare('SELECT * FROM comments WHERE ticket_id = ? AND household_id = ? ORDER BY id ASC')
+    .bind(id, H.hh).all();
+  const pts = await H.db.prepare('SELECT * FROM points WHERE ticket_id = ? AND household_id = ? ORDER BY id').bind(id, H.hh).all();
   return json({ ticket, comments: results, points: pts.results });
 }
 
-async function addComment(db, request, actor, id) {
-  const ticket = await getTicket(db, id);
+async function addComment(H, request, actor, id) {
+  const ticket = await getTicket(H, id);
   if (!ticket) return bad('Not found', 404);
   const body = await request.json().catch(() => ({}));
   const text = String(body.body || '').trim().slice(0, 5000);
   if (!text) return bad('Comment is empty');
-  const row = await db.prepare(
-    'INSERT INTO comments (ticket_id, author, body) VALUES (?, ?, ?) RETURNING *',
-  ).bind(id, actor, text).first();
-  await db.prepare("UPDATE tickets SET updated_at = datetime('now') WHERE id = ?").bind(id).run();
-  const members = await getMembers(db);
-  await notify(db, recipientsFor(ticket, actor, members), id, actor, 'comment', `💬 “${ticket.title}”: ${text}`);
+  const row = await H.db.prepare(
+    'INSERT INTO comments (household_id, ticket_id, author, body) VALUES (?, ?, ?, ?) RETURNING *',
+  ).bind(H.hh, id, actor, text).first();
+  await H.db.prepare("UPDATE tickets SET updated_at = datetime('now') WHERE id = ? AND household_id = ?").bind(id, H.hh).run();
+  const members = await getMembers(H.db, H.hh);
+  await notify(H, recipientsFor(ticket, actor, members), id, actor, 'comment', `💬 “${ticket.title}”: ${text}`);
   return json({ comment: row }, 201);
 }
 
-async function deleteTicket(db, id) {
-  await db.batch([
-    db.prepare('DELETE FROM comments WHERE ticket_id = ?').bind(id),
-    db.prepare('DELETE FROM notifications WHERE ticket_id = ?').bind(id),
-    db.prepare('DELETE FROM tickets WHERE id = ?').bind(id),
+async function deleteTicket(H, id) {
+  if (!(await getTicket(H, id))) return bad('Not found', 404);
+  await H.db.batch([
+    H.db.prepare('DELETE FROM comments WHERE ticket_id = ? AND household_id = ?').bind(id, H.hh),
+    H.db.prepare('DELETE FROM notifications WHERE ticket_id = ? AND household_id = ?').bind(id, H.hh),
+    H.db.prepare('DELETE FROM tickets WHERE id = ? AND household_id = ?').bind(id, H.hh),
   ]);
   return json({ ok: true });
 }
 
 // ---------- notifications ----------
 
-async function listNotifications(db, actor) {
-  const { results } = await db.prepare(
-    'SELECT * FROM notifications WHERE recipient = ? ORDER BY id DESC LIMIT 60',
-  ).bind(actor).all();
-  const unread = await db.prepare(
-    'SELECT COUNT(*) AS n FROM notifications WHERE recipient = ? AND read_at IS NULL',
-  ).bind(actor).first();
+async function listNotifications(H, actor) {
+  const { results } = await H.db.prepare(
+    'SELECT * FROM notifications WHERE household_id = ? AND recipient = ? ORDER BY id DESC LIMIT 60',
+  ).bind(H.hh, actor).all();
+  const unread = await H.db.prepare(
+    'SELECT COUNT(*) AS n FROM notifications WHERE household_id = ? AND recipient = ? AND read_at IS NULL',
+  ).bind(H.hh, actor).first();
   return json({ notifications: results, unread: unread.n });
 }
 
-async function markRead(db, request, actor) {
+async function markRead(H, request, actor) {
   const body = await request.json().catch(() => ({}));
+  const base = "UPDATE notifications SET read_at = datetime('now') WHERE household_id = ? AND recipient = ? AND read_at IS NULL";
   if (Array.isArray(body.ids) && body.ids.length) {
     const ids = body.ids.map(Number).filter(Number.isInteger).slice(0, 200);
-    await db.prepare(
-      `UPDATE notifications SET read_at = datetime('now')
-       WHERE recipient = ? AND read_at IS NULL AND id IN (${ids.map(() => '?').join(',')})`,
-    ).bind(actor, ...ids).run();
+    await H.db.prepare(`${base} AND id IN (${ids.map(() => '?').join(',')})`).bind(H.hh, actor, ...ids).run();
   } else if (body.ticket_id) {
-    await db.prepare(
-      "UPDATE notifications SET read_at = datetime('now') WHERE recipient = ? AND read_at IS NULL AND ticket_id = ?",
-    ).bind(actor, Number(body.ticket_id)).run();
+    await H.db.prepare(`${base} AND ticket_id = ?`).bind(H.hh, actor, Number(body.ticket_id)).run();
   } else {
-    await db.prepare(
-      "UPDATE notifications SET read_at = datetime('now') WHERE recipient = ? AND read_at IS NULL",
-    ).bind(actor).run();
+    await H.db.prepare(base).bind(H.hh, actor).run();
   }
-  return listNotifications(db, actor);
+  return listNotifications(H, actor);
 }
 
 // ---------- points & rewards ----------
 
-async function pointsSummary(db) {
-  const members = await getMembers(db);
-  const totals = await db.prepare(`
+async function pointsSummary(H) {
+  const members = await getMembers(H.db, H.hh);
+  const totals = await H.db.prepare(`
     SELECT member,
       SUM(points) AS balance,
       SUM(CASE WHEN points > 0 THEN points ELSE 0 END) AS lifetime,
@@ -403,17 +392,17 @@ async function pointsSummary(db) {
       SUM(CASE WHEN kind = 'complete' THEN 1 ELSE 0 END) AS jobs,
       SUM(CASE WHEN kind = 'ontime' THEN 1 ELSE 0 END) AS ontime,
       SUM(CASE WHEN kind = 'thanks' THEN 1 ELSE 0 END) AS thanks
-    FROM points GROUP BY member`).all();
-  const weekly = await db.prepare(`
+    FROM points WHERE household_id = ? GROUP BY member`).bind(H.hh).all();
+  const weekly = await H.db.prepare(`
     SELECT member, date(created_at, 'weekday 0', '-6 days') AS week, SUM(points) AS pts
-    FROM points WHERE points > 0 AND created_at >= datetime('now', '-120 days')
-    GROUP BY member, week ORDER BY week DESC`).all();
-  const history = await db.prepare(`
+    FROM points WHERE household_id = ? AND points > 0 AND created_at >= datetime('now', '-120 days')
+    GROUP BY member, week ORDER BY week DESC`).bind(H.hh).all();
+  const history = await H.db.prepare(`
     SELECT p.*, t.title FROM points p LEFT JOIN tickets t ON t.id = p.ticket_id
-    ORDER BY p.id DESC LIMIT 40`).all();
-  const rewards = await db.prepare('SELECT * FROM rewards WHERE active = 1 ORDER BY cost').all();
+    WHERE p.household_id = ? ORDER BY p.id DESC LIMIT 40`).bind(H.hh).all();
+  const rewards = await H.db.prepare('SELECT * FROM rewards WHERE household_id = ? AND active = 1 ORDER BY cost').bind(H.hh).all();
   return json({
-    members,
+    members: members.map(({ name, role }) => ({ name, role })),
     totals: totals.results,
     weekly: weekly.results,
     history: history.results,
@@ -421,44 +410,45 @@ async function pointsSummary(db) {
   });
 }
 
-async function createReward(db, request) {
+async function createReward(H, request) {
   const body = await request.json().catch(() => ({}));
   const title = String(body.title || '').trim().slice(0, 100);
   const cost = Math.round(Number(body.cost) || 0);
   const emoji = String(body.emoji || '🎁').slice(0, 8);
   if (!title) return bad('Reward needs a name');
   if (cost <= 0 || cost > 100000) return bad('Cost must be a positive number of points');
-  const row = await db.prepare('INSERT INTO rewards (title, cost, emoji) VALUES (?, ?, ?) RETURNING *')
-    .bind(title, cost, emoji).first();
+  const row = await H.db.prepare('INSERT INTO rewards (household_id, title, cost, emoji) VALUES (?, ?, ?, ?) RETURNING *')
+    .bind(H.hh, title, cost, emoji).first();
   return json({ reward: row }, 201);
 }
 
-async function redeemReward(db, actor, id) {
-  const reward = await db.prepare('SELECT * FROM rewards WHERE id = ? AND active = 1').bind(id).first();
+async function redeemReward(H, actor, id) {
+  const reward = await H.db.prepare('SELECT * FROM rewards WHERE id = ? AND household_id = ? AND active = 1').bind(id, H.hh).first();
   if (!reward) return bad('Reward not found', 404);
-  const bal = await db.prepare('SELECT COALESCE(SUM(points),0) AS b FROM points WHERE member = ?').bind(actor).first();
+  const bal = await H.db.prepare('SELECT COALESCE(SUM(points),0) AS b FROM points WHERE household_id = ? AND member = ?')
+    .bind(H.hh, actor).first();
   if (bal.b < reward.cost) return bad(`Not enough points — you have ${bal.b}, need ${reward.cost}`);
-  await db.prepare(
-    "INSERT INTO points (member, kind, points, note) VALUES (?, 'redeem', ?, ?)",
-  ).bind(actor, -reward.cost, `${reward.emoji} ${reward.title}`).run();
-  const members = await getMembers(db);
-  await notify(db, members.filter((m) => m.name !== actor).map((m) => m.name), null, actor, 'reward',
+  await H.db.prepare(
+    "INSERT INTO points (household_id, member, kind, points, note) VALUES (?, ?, 'redeem', ?, ?)",
+  ).bind(H.hh, actor, -reward.cost, `${reward.emoji} ${reward.title}`).run();
+  const members = await getMembers(H.db, H.hh);
+  await notify(H, members.filter((m) => m.name !== actor).map((m) => m.name), null, actor, 'reward',
     `🎉 ${actor} cashed in ${reward.cost} pts for: ${reward.emoji} ${reward.title}`);
   return json({ ok: true, balance: bal.b - reward.cost });
 }
 
 // ---------- settings & stats ----------
 
-async function getSettings(db, env) {
-  const { results } = await db.prepare('SELECT key, value FROM settings').all();
-  const s = Object.fromEntries(results.map((r) => [r.key, r.value]));
+async function getSettings(H) {
+  const s = await getSettingsMap(H.db, H.hh);
+  const members = await getMembers(H.db, H.hh);
   // AI status for Settings: which provider is active and where its key came from. Never the key itself.
-  const g = await geminiKey(env, db);
+  const g = await geminiKey(H.env, H.db, H.hh);
   const ai = g.key
-    ? { provider: 'gemini', source: g.source, hint: keyHint(g.key), model: env.GEMINI_MODEL || 'gemini-3.6-flash' }
-    : env.ANTHROPIC_API_KEY ? { provider: 'claude', source: 'cloudflare', hint: '' } : { provider: null, source: null, hint: '' };
+    ? { provider: 'gemini', source: g.source, hint: keyHint(g.key), model: H.env.GEMINI_MODEL || 'gemini-3.6-flash' }
+    : H.env.ANTHROPIC_API_KEY ? { provider: 'claude', source: 'cloudflare', hint: '' } : { provider: null, source: null, hint: '' };
   return json({
-    members: JSON.parse(s.members || '[]'),
+    members: members.map(({ name, role }) => ({ name, role })),
     capacity_min: Number(s.capacity_min || 240),
     dictionary: readDictionary(s),
     ai,
@@ -483,37 +473,35 @@ async function verifyGeminiKey(env, key) {
   throw new Error(`Google answered ${res.status} — try again in a minute.`);
 }
 
-async function putSettings(db, request, env) {
+async function putSettings(H, request) {
   const body = await request.json().catch(() => ({}));
+  const put = (key, value) => H.db.prepare('INSERT OR REPLACE INTO settings (household_id, key, value) VALUES (?, ?, ?)')
+    .bind(H.hh, key, value);
   const stmts = [];
-  // Members come from accounts now (see /api/auth); body.members is ignored.
   if (body.capacity_min !== undefined) {
     const n = Math.max(0, Math.min(10080, Math.round(Number(body.capacity_min) || 0)));
-    stmts.push(db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)')
-      .bind('capacity_min', String(n)));
+    stmts.push(put('capacity_min', String(n)));
   }
   if (body.dictionary !== undefined) {
     // Household dictionary for speech recognition + AI parsing (see lib/dictionary.js).
-    stmts.push(db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)')
-      .bind('dictionary', JSON.stringify(cleanDictionary(body.dictionary))));
+    stmts.push(put('dictionary', JSON.stringify(cleanDictionary(body.dictionary))));
   }
   if (body.gemini_api_key !== undefined) {
     const key = String(body.gemini_api_key || '').trim();
     if (!key) {
-      stmts.push(db.prepare("DELETE FROM settings WHERE key = 'gemini_key_enc'"));
+      stmts.push(H.db.prepare("DELETE FROM settings WHERE household_id = ? AND key = 'gemini_key_enc'").bind(H.hh));
     } else {
       if (key.length < 20 || key.length > 200 || /\s/.test(key)) return bad("That doesn't look like a Gemini API key.");
-      try { await verifyGeminiKey(env, key); } catch (e) { return bad(e.message); }
-      stmts.push(db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)')
-        .bind('gemini_key_enc', await encryptSecret(env, key)));
+      try { await verifyGeminiKey(H.env, key); } catch (e) { return bad(e.message); }
+      stmts.push(put('gemini_key_enc', await encryptSecret(H.env, key)));
     }
   }
-  if (stmts.length) await db.batch(stmts);
-  return getSettings(db, env);
+  if (stmts.length) await H.db.batch(stmts);
+  return getSettings(H);
 }
 
-async function stats(db) {
-  const row = await db.prepare(`
+async function stats(H) {
+  const row = await H.db.prepare(`
     SELECT
       SUM(CASE WHEN status IN ('new','backlog','scheduled','in_progress','blocked') THEN 1 ELSE 0 END) AS open,
       SUM(CASE WHEN status = 'new' THEN 1 ELSE 0 END) AS untriaged,
@@ -522,18 +510,20 @@ async function stats(db) {
       SUM(CASE WHEN status IN ('resolved','closed') AND resolved_at >= datetime('now','-30 days') THEN estimate_min ELSE 0 END) AS minutes_30d,
       AVG(CASE WHEN resolved_at >= datetime('now','-30 days')
                THEN julianday(resolved_at) - julianday(created_at) END) AS avg_days_to_resolve
-    FROM tickets`).first();
+    FROM tickets WHERE household_id = ?`).bind(H.hh).first();
   return json({ stats: row });
 }
 
 // ---------- router ----------
 
 export async function onRequest({ request, env, params, data }) {
-  const db = env.DB;
-  if (!db) return bad('D1 binding "DB" is missing', 500);
+  if (!env.DB) return bad('D1 binding "DB" is missing', 500);
+  const user = data.user;
+  if (!user?.household_id) return bad('Link your accounts first.', 403); // middleware normally stops this earlier
+  const H = { db: env.DB, hh: user.household_id, env };
+  const actor = user.name;
   const parts = params.route || [];
   const method = request.method;
-  const actor = actorOf(data);
   const url = new URL(request.url);
 
   try {
@@ -542,29 +532,29 @@ export async function onRequest({ request, env, params, data }) {
     if (numId !== null && !Number.isInteger(numId)) return bad('Bad id');
 
     if (res === 'tickets') {
-      if (id === undefined && method === 'GET') return await listTickets(db, url);
-      if (id === undefined && method === 'POST') return await createTicket(db, request, actor);
-      if (sub === undefined && method === 'GET') return await ticketDetail(db, numId);
-      if (sub === undefined && method === 'PATCH') return await updateTicket(db, request, actor, numId);
-      if (sub === undefined && method === 'DELETE') return await deleteTicket(db, numId);
-      if (sub === 'comments' && method === 'POST') return await addComment(db, request, actor, numId);
+      if (id === undefined && method === 'GET') return await listTickets(H, url);
+      if (id === undefined && method === 'POST') return await createTicket(H, request, actor);
+      if (sub === undefined && method === 'GET') return await ticketDetail(H, numId);
+      if (sub === undefined && method === 'PATCH') return await updateTicket(H, request, actor, numId);
+      if (sub === undefined && method === 'DELETE') return await deleteTicket(H, numId);
+      if (sub === 'comments' && method === 'POST') return await addComment(H, request, actor, numId);
     }
     if (res === 'notifications') {
-      if (id === undefined && method === 'GET') return await listNotifications(db, actor);
-      if (id === 'read' && method === 'POST') return await markRead(db, request, actor);
+      if (id === undefined && method === 'GET') return await listNotifications(H, actor);
+      if (id === 'read' && method === 'POST') return await markRead(H, request, actor);
     }
-    if (res === 'points' && method === 'GET') return await pointsSummary(db);
+    if (res === 'points' && method === 'GET') return await pointsSummary(H);
     if (res === 'rewards') {
-      if (id === undefined && method === 'POST') return await createReward(db, request);
+      if (id === undefined && method === 'POST') return await createReward(H, request);
       if (sub === undefined && method === 'DELETE') {
-        await db.prepare('UPDATE rewards SET active = 0 WHERE id = ?').bind(numId).run();
+        await H.db.prepare('UPDATE rewards SET active = 0 WHERE id = ? AND household_id = ?').bind(numId, H.hh).run();
         return json({ ok: true });
       }
-      if (sub === 'redeem' && method === 'POST') return await redeemReward(db, actor, numId);
+      if (sub === 'redeem' && method === 'POST') return await redeemReward(H, actor, numId);
     }
-    if (res === 'settings' && method === 'GET') return await getSettings(db, env);
-    if (res === 'settings' && method === 'PUT') return await putSettings(db, request, env);
-    if (res === 'stats' && method === 'GET') return await stats(db);
+    if (res === 'settings' && method === 'GET') return await getSettings(H);
+    if (res === 'settings' && method === 'PUT') return await putSettings(H, request);
+    if (res === 'stats' && method === 'GET') return await stats(H);
     return bad('Not found', 404);
   } catch (err) {
     return bad(err.message || 'Bad request');

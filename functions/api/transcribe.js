@@ -26,18 +26,19 @@ function toBase64(buf) {
   return btoa(bin);
 }
 
-async function buildPrompt(db, previous) {
+async function buildPrompt(db, hh, previous) {
   const parts = ['A family member listing household chores and repairs.'];
   try {
-    const { results } = await db.prepare("SELECT key, value FROM settings WHERE key IN ('members','vocab','dictionary')").all();
+    const { results } = await db.prepare("SELECT key, value FROM settings WHERE household_id = ? AND key IN ('vocab','dictionary')").bind(hh).all();
     const s = Object.fromEntries(results.map((r) => [r.key, r.value]));
-    const names = JSON.parse(s.members || '[]').map((m) => m.name).filter(Boolean);
+    const people = await db.prepare('SELECT name FROM users WHERE household_id = ?').bind(hh).all();
+    const names = people.results.map((m) => m.name).filter(Boolean);
     if (names.length) parts.push(`People: ${names.join(', ')}.`);
     const terms = whisperTerms(readDictionary(s));
     if (terms) parts.push(`Words we use: ${terms}.`);
     const open = await db.prepare(
-      "SELECT title FROM tickets WHERE status NOT IN ('resolved','closed') ORDER BY updated_at DESC LIMIT 12",
-    ).all();
+      "SELECT title FROM tickets WHERE household_id = ? AND status NOT IN ('resolved','closed') ORDER BY updated_at DESC LIMIT 12",
+    ).bind(hh).all();
     if (open.results.length) parts.push(`Current jobs: ${open.results.map((t) => t.title).join('; ')}.`);
   } catch { /* prompt is best-effort */ }
   let prompt = parts.join(' ');
@@ -47,7 +48,7 @@ async function buildPrompt(db, previous) {
   return prompt.trim();
 }
 
-export async function onRequestPost({ request, env }) {
+export async function onRequestPost({ request, env, data }) {
   if (!env.AI) return json({ error: 'Server transcription is not set up (missing Workers AI binding "AI").' }, 503);
   const audio = await request.arrayBuffer();
   if (!audio.byteLength) return json({ error: 'No audio received' }, 400);
@@ -64,7 +65,7 @@ export async function onRequestPost({ request, env }) {
       language,
       vad_filter: true,
       beam_size: 5,
-      initial_prompt: await buildPrompt(env.DB, previous),
+      initial_prompt: await buildPrompt(env.DB, data.user.household_id, previous),
       // Chunks carry context via the prompt; this stops repetition loops inside a chunk.
       condition_on_previous_text: false,
       hallucination_silence_threshold: 2,

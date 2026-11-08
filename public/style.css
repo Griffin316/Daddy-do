@@ -111,7 +111,7 @@ h3 { font-size: 15px; margin: 20px 0 8px; color: var(--muted); text-transform: u
   padding: 14px; margin-bottom: 10px;
 }
 
-input[type=text], input[type=password], input[type=number], input[type=date], input[type=time], select, textarea {
+input[type=text], input[type=email], input[type=password], input[type=number], input[type=date], input[type=time], select, textarea {
   width: 100%; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--line);
   background: var(--bg);
 }
@@ -311,3 +311,7 @@ dialog::backdrop { background: rgba(0,0,0,.45); }
   margin: 8px 0; user-select: all; -webkit-user-select: all;
 }
 .code.small { font-size: 14px; letter-spacing: 0; font-weight: 600; }
+.invite-card { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, var(--card)); }
+.card.auth h3 { margin-top: 18px; }
+
+a.btn { text-decoration: none; display: inline-block; }

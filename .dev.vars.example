@@ -1,5 +1,5 @@
 # Copy to .dev.vars for local dev (gitignored). In production set these as Pages secrets.
-HOUSEHOLD_PIN=change-me-to-a-long-passphrase
+
 SESSION_SECRET=any-long-random-string
 # AI for /api/parse (voice → Do's). Gemini is used when its key is set (free tier at https://aistudio.google.com/apikey);
 # otherwise Claude if ANTHROPIC_API_KEY is set.

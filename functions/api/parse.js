@@ -161,7 +161,9 @@ async function callClaude(env, userMsg) {
 }
 
 export async function onRequestPost({ request, env, data }) {
-  const gem = await geminiKey(env, env.DB); // Cloudflare secret, or the key saved in the app's Settings
+  const hh = data.user?.household_id;
+  if (!hh) return json({ error: 'Link your accounts first.' }, 403);
+  const gem = await geminiKey(env, env.DB, hh); // Cloudflare secret, or the key this household saved in Settings
   const provider = gem.key ? 'gemini' : env.ANTHROPIC_API_KEY ? 'claude' : null;
   if (!provider) {
     return json({ error: 'Voice parsing is off: add your free Gemini key in ⚙︎ Settings → AI for voice.' }, 503);
@@ -173,8 +175,8 @@ export async function onRequestPost({ request, env, data }) {
 
   // Give the model the open tickets so it can flag duplicates.
   const { results: open } = await env.DB.prepare(
-    "SELECT id, title FROM tickets WHERE status NOT IN ('resolved','closed') ORDER BY id DESC LIMIT 200",
-  ).all();
+    "SELECT id, title FROM tickets WHERE household_id = ? AND status NOT IN ('resolved','closed') ORDER BY id DESC LIMIT 200",
+  ).bind(hh).all();
 
   const now = new Date();
   const tz = body.tz || 'UTC';
@@ -182,7 +184,7 @@ export async function onRequestPost({ request, env, data }) {
   const weekday = new Intl.DateTimeFormat('en-US', { timeZone: tz, weekday: 'long' }).format(now);
   const speaker = data.user?.name || 'a household member';
 
-  const settingsRows = await env.DB.prepare("SELECT key, value FROM settings WHERE key IN ('vocab','dictionary')").all();
+  const settingsRows = await env.DB.prepare("SELECT key, value FROM settings WHERE household_id = ? AND key IN ('vocab','dictionary')").bind(hh).all();
   const glossary = aiGlossary(readDictionary(Object.fromEntries(settingsRows.results.map((r) => [r.key, r.value]))));
 
   const userMsg = `Today is ${weekday} ${today}.
