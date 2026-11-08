@@ -31,7 +31,8 @@ const publicUser = (u) => u && { id: u.id, name: u.name, username: u.username, r
 
 function cleanUsername(v) {
   const u = String(v || '').trim().toLowerCase();
-  if (!/^[a-z0-9._-]{3,30}$/.test(u)) throw new Error('Username: 3–30 letters, numbers, dots, dashes or underscores.');
+  // Plain usernames or email addresses both work.
+  if (!/^[a-z0-9._+@-]{3,60}$/.test(u)) throw new Error('Username: 3–60 letters or numbers (an email address works too).');
   return u;
 }
 function cleanName(v) {

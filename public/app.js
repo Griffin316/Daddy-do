@@ -396,20 +396,28 @@ function renderSetup() {
     <h2>Set up your household</h2>
     <p class="muted small">First time only. Create your account, then invite your partner from Settings to link your accounts.</p>
     <form id="auth-f">
-      <label for="a-pin">Household passphrase</label>
-      <input type="password" id="a-pin" autocomplete="off" required>
+      <label for="a-pin">Household passphrase <span class="muted">(capitals and spaces don’t matter)</span></label>
+      <div class="row" style="flex-wrap:nowrap">
+        <input type="password" id="a-pin" class="grow" style="flex:1;width:auto" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" required>
+        <button type="button" class="btn sm" id="a-pin-show">Show</button>
+      </div>
       <label for="a-name">Your name <span class="muted">(shown on Do’s)</span></label>
       <input type="text" id="a-name" maxlength="40" placeholder="Dad" required>
       <label>You are…</label>
       ${roleChips('fixer')}
       <label for="a-user">Username</label>
-      <input type="text" id="a-user" autocomplete="username" autocapitalize="off" spellcheck="false" placeholder="e.g. griffin" required>
+      <input type="text" id="a-user" autocomplete="username" autocapitalize="off" spellcheck="false" placeholder="e.g. griffin or your email" required>
       <label for="a-pass">Password <span class="muted">(8+ characters)</span></label>
       <input type="password" id="a-pass" autocomplete="new-password" minlength="8" required>
       <p class="small err" id="a-err"></p>
       <button class="btn primary block">Create my account</button>
     </form>`);
   wireRoleChips(f);
+  $('#a-pin-show').onclick = (e) => {
+    const i = $('#a-pin');
+    i.type = i.type === 'password' ? 'text' : 'password';
+    e.currentTarget.textContent = i.type === 'password' ? 'Show' : 'Hide';
+  };
   $('#auth-f').onsubmit = (e) => {
     e.preventDefault();
     authPost('/auth/setup', {
