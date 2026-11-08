@@ -230,7 +230,7 @@ async function api(path, opts = {}) {
     credentials: 'same-origin',
   });
   const data = await res.json().catch(() => ({}));
-  if (res.status === 401 && path !== '/login') {
+  if (res.status === 401 && !path.startsWith('/auth/')) {
     renderLogin();
     throw new Error('Please log in');
   }
@@ -308,68 +308,165 @@ async function patch(id, body, msg) {
 
 async function boot() {
   try {
-    const s = await fetch('/api/session').then((r) => r.json());
-    if (!s.authed) return renderLogin(s.error);
+    const st = await fetch('/api/auth/status', { credentials: 'same-origin' }).then((r) => r.json());
+    const params = new URLSearchParams(location.search);
+    const invite = params.get('invite');
+    if (invite && !st.authed) return renderJoin(invite);
+    if (st.setup_needed) return renderSetup();
+    if (!st.authed) return renderLogin();
+    if (invite) { history.replaceState(null, '', '/'); toast('You’re already signed in on this phone'); }
+    state.user = st.user;
+    state.me = st.user.name;
+    localStorage.setItem('dd_me', state.me);
     const settings = await api('/settings');
     state.members = settings.members;
     state.capacity = settings.capacity_min;
     state.dictionary = settings.dictionary || [];
     state.ai = settings.ai || { provider: null };
-    if (!state.members.some((m) => m.name === state.me)) return renderWhoAmI();
     await refresh();
     render();
     // Deep link from a tapped Android notification: /?ticket=123
-    const tid = Number(new URLSearchParams(location.search).get('ticket'));
+    const tid = Number(params.get('ticket'));
     if (tid) { history.replaceState(null, '', '/'); openTicket(tid); }
   } catch (e) {
     app.innerHTML = `<p class="empty">${esc(e.message)}</p>`;
   }
 }
 
-function renderLogin(err) {
+// ---------- accounts: sign in, first-time setup, join by invite, reset ----------
+
+function authShell(inner) {
   $('#tabs').hidden = true;
   $('#who').innerHTML = '';
-  app.innerHTML = `
-    <div class="card" style="max-width:420px;margin:40px auto">
-      <h2>Household login</h2>
-      <p class="muted small">Enter the household passphrase. You'll stay logged in on this device.</p>
-      <form id="login">
-        <input type="password" name="pin" class="big-input" placeholder="Passphrase" autocomplete="current-password" required>
-        <p class="small" id="login-err" style="color:var(--p1)">${esc(err || '')}</p>
-        <button class="btn primary block">Log in</button>
-      </form>
-    </div>`;
-  $('#login').onsubmit = async (e) => {
+  side.hidden = true;
+  layout.classList.remove('has-side');
+  app.innerHTML = `<div class="card auth">${inner}</div>`;
+}
+
+async function authPost(path, body, errEl) {
+  try {
+    await api(path, { method: 'POST', body });
+    history.replaceState(null, '', '/');
+    state.tab = '';
+    state.lastNotifId = 0;
+    boot();
+  } catch (e) {
+    errEl.textContent = e.message;
+  }
+}
+
+const roleChips = (sel) => `
+  <div class="chips" id="role">
+    <button type="button" class="chip ${sel === 'fixer' ? 'on' : ''}" data-r="fixer">🛠️ I do the Do’s</button>
+    <button type="button" class="chip ${sel !== 'fixer' ? 'on' : ''}" data-r="requester">📝 I ask for Do’s</button>
+  </div>`;
+function wireRoleChips(holder) {
+  holder.role = holder.role || 'requester';
+  $('#role')?.querySelectorAll('[data-r]').forEach((b) => {
+    b.onclick = () => {
+      holder.role = b.dataset.r;
+      $('#role').querySelectorAll('.chip').forEach((c) => c.classList.toggle('on', c === b));
+    };
+  });
+}
+
+function renderLogin(err = '') {
+  authShell(`
+    <h2>Sign in</h2>
+    <form id="auth-f">
+      <label for="a-user">Username</label>
+      <input type="text" id="a-user" autocomplete="username" autocapitalize="off" spellcheck="false" required>
+      <label for="a-pass">Password</label>
+      <input type="password" id="a-pass" autocomplete="current-password" required>
+      <p class="small err" id="a-err">${esc(err)}</p>
+      <button class="btn primary block">Sign in</button>
+    </form>
+    <p class="small muted" style="margin-top:14px">New here? Ask your partner to send you an invite link from ⚙︎ Settings → Household.</p>
+    <p class="small"><button class="link small" id="a-reset">Forgot your password? Use a reset code</button></p>`);
+  $('#auth-f').onsubmit = (e) => {
     e.preventDefault();
-    try {
-      await api('/login', { method: 'POST', body: { pin: e.target.pin.value } });
-      boot();
-    } catch (er) {
-      $('#login-err').textContent = er.message;
-    }
+    authPost('/auth/login', { username: $('#a-user').value, password: $('#a-pass').value }, $('#a-err'));
+  };
+  $('#a-reset').onclick = () => renderReset();
+}
+
+function renderSetup() {
+  const f = { role: 'fixer' };
+  authShell(`
+    <h2>Set up your household</h2>
+    <p class="muted small">First time only. Create your account, then invite your partner from Settings to link your accounts.</p>
+    <form id="auth-f">
+      <label for="a-pin">Household passphrase</label>
+      <input type="password" id="a-pin" autocomplete="off" required>
+      <label for="a-name">Your name <span class="muted">(shown on Do’s)</span></label>
+      <input type="text" id="a-name" maxlength="40" placeholder="Dad" required>
+      <label>You are…</label>
+      ${roleChips('fixer')}
+      <label for="a-user">Username</label>
+      <input type="text" id="a-user" autocomplete="username" autocapitalize="off" spellcheck="false" placeholder="e.g. griffin" required>
+      <label for="a-pass">Password <span class="muted">(8+ characters)</span></label>
+      <input type="password" id="a-pass" autocomplete="new-password" minlength="8" required>
+      <p class="small err" id="a-err"></p>
+      <button class="btn primary block">Create my account</button>
+    </form>`);
+  wireRoleChips(f);
+  $('#auth-f').onsubmit = (e) => {
+    e.preventDefault();
+    authPost('/auth/setup', {
+      pin: $('#a-pin').value, name: $('#a-name').value, role: f.role, username: $('#a-user').value, password: $('#a-pass').value,
+    }, $('#a-err'));
   };
 }
 
-function renderWhoAmI() {
-  $('#tabs').hidden = true;
-  app.innerHTML = `
-    <div class="card" style="max-width:420px;margin:40px auto">
-      <h2>Who's using this phone?</h2>
-      <div class="chips" style="margin-top:12px">
-        ${state.members.map((m) => `<button class="chip" data-name="${esc(m.name)}">${esc(m.name)}
-          <span class="muted small">${m.role === 'fixer' ? '(does the work)' : '(requests)'}</span></button>`).join('')}
-      </div>
-      <p class="muted small" style="margin-top:14px">You can rename people in Settings.</p>
-    </div>`;
-  app.querySelectorAll('[data-name]').forEach((b) => {
-    b.onclick = async () => {
-      state.me = b.dataset.name;
-      localStorage.setItem('dd_me', state.me);
-      state.tab = '';
-      await refresh();
-      render();
-    };
-  });
+async function renderJoin(code) {
+  authShell('<p class="muted">Checking your invite…</p>');
+  let info;
+  try {
+    info = await api(`/auth/invite/${encodeURIComponent(code)}`);
+  } catch (e) {
+    authShell(`<h2>Invite link</h2><p class="small err">${esc(e.message)}</p>
+      <button class="btn block" id="a-signin">Sign in instead</button>`);
+    $('#a-signin').onclick = () => { history.replaceState(null, '', '/'); renderLogin(); };
+    return;
+  }
+  authShell(`
+    <h2>Join ${esc(info.invited_by)} on Daddy-Do</h2>
+    <p class="muted small">${esc(info.invited_by)} invited you to share your household’s Do list.
+      You’ll join as someone who ${info.role === 'fixer' ? '<b>does the Do’s</b>' : '<b>asks for Do’s</b>'}.</p>
+    <form id="auth-f">
+      <label for="a-name">Your name <span class="muted">(shown on Do’s)</span></label>
+      <input type="text" id="a-name" maxlength="40" value="${esc(info.name_hint || '')}" placeholder="Mom" required>
+      <label for="a-user">Pick a username</label>
+      <input type="text" id="a-user" autocomplete="username" autocapitalize="off" spellcheck="false" required>
+      <label for="a-pass">Pick a password <span class="muted">(8+ characters)</span></label>
+      <input type="password" id="a-pass" autocomplete="new-password" minlength="8" required>
+      <p class="small err" id="a-err"></p>
+      <button class="btn primary block">Join the household</button>
+    </form>`);
+  $('#auth-f').onsubmit = (e) => {
+    e.preventDefault();
+    authPost('/auth/join', { code, name: $('#a-name').value, username: $('#a-user').value, password: $('#a-pass').value }, $('#a-err'));
+  };
+}
+
+function renderReset() {
+  authShell(`
+    <h2>Reset your password</h2>
+    <p class="muted small">Ask your partner to open ⚙︎ Settings → Household and tap <b>Reset code</b> next to your name. Codes last 24 hours.</p>
+    <form id="auth-f">
+      <label for="a-code">Reset code</label>
+      <input type="text" id="a-code" autocapitalize="characters" spellcheck="false" placeholder="ABCDE-FGHJK" required>
+      <label for="a-pass">New password <span class="muted">(8+ characters)</span></label>
+      <input type="password" id="a-pass" autocomplete="new-password" minlength="8" required>
+      <p class="small err" id="a-err"></p>
+      <button class="btn primary block">Set password and sign in</button>
+    </form>
+    <p class="small"><button class="link small" id="a-back">← Back to sign in</button></p>`);
+  $('#auth-f').onsubmit = (e) => {
+    e.preventDefault();
+    authPost('/auth/reset', { code: $('#a-code').value, password: $('#a-pass').value }, $('#a-err'));
+  };
+  $('#a-back').onclick = () => renderLogin();
 }
 
 // ---------- layout ----------
@@ -412,12 +509,12 @@ function render() {
   $('#who').innerHTML = `
     ${isFixer() || pts.balance ? `<button class="pts-chip" id="pts-chip" title="Your points">⭐ ${pts.balance || 0}</button>` : ''}
     <button class="bell" id="bell" aria-label="Notifications">🔔<span class="badge" id="bell-count" hidden></span></button>
-    <span class="me">${esc(state.me)}</span> <button class="link small" id="switch">switch</button>`;
+    <button class="link me-btn" id="me-btn" aria-label="Your account">${esc(state.me)}</button>`;
   $('#bell').onclick = openNotifications;
   const pc = $('#pts-chip');
   if (pc) pc.onclick = () => { state.tab = 'rewards'; render(); };
   updateBell();
-  $('#switch').onclick = () => { state.me = ''; localStorage.removeItem('dd_me'); renderWhoAmI(); };
+  $('#me-btn').onclick = () => { state.tab = 'settings'; render(); window.scrollTo(0, 0); };
 
   const nav = $('#tabs');
   nav.hidden = false;
@@ -790,14 +887,10 @@ function viewSettings() {
   app.innerHTML = `
     <h2>Settings</h2>
     ${state.ai?.provider ? '' : aiCard()}
+    <div class="card" id="household"><b>👨‍👩‍👧 Household</b><p class="muted small">Loading members…</p></div>
     <form id="sf" class="card">
-      <label>Household members</label>
-      <div id="members">
-        ${state.members.map((m) => memberRow(m)).join('')}
-      </div>
-      <button type="button" class="btn sm" id="addm" style="margin-top:6px">+ Add person</button>
-      <label style="margin-top:16px">Hours available for chores per week</label>
-      <input type="number" name="cap" min="0" max="168" step="0.5" value="${state.capacity / 60}">
+      <label for="cap">Hours available for chores per week</label>
+      <input type="number" id="cap" name="cap" min="0" max="168" step="0.5" value="${state.capacity / 60}">
       <p class="muted small">Be honest — this is what "This week" plans against. Over-capacity shows red so you can negotiate what slips.</p>
       <button class="btn primary block" style="margin-top:12px">Save</button>
     </form>
@@ -829,27 +922,17 @@ function viewSettings() {
         <button class="btn sm" id="install" ${installPrompt ? '' : 'hidden'}>📲 Install app</button>
       </div>
     </div>
-    <div class="card row spread">
-      <span class="small muted">Logged in on this device</span>
-      <button class="btn sm danger" id="logout">Log out</button>
-    </div>`;
-  $('#addm').onclick = () => $('#members').insertAdjacentHTML('beforeend', memberRow({ name: '', role: 'requester' }));
-  $('#members').onclick = (e) => { if (e.target.dataset.rm !== undefined) e.target.closest('.row').remove(); };
+    ${accountCard()}`;
   $('#sf').onsubmit = async (e) => {
     e.preventDefault();
-    const members = [...$('#members').querySelectorAll('.row')].map((r) => ({
-      name: r.querySelector('input').value.trim(), role: r.querySelector('select').value,
-    })).filter((m) => m.name);
     try {
-      const old = state.me;
-      const r = await api('/settings', { method: 'PUT', body: { members, capacity_min: Math.round(+e.target.cap.value * 60) } });
-      state.members = r.members;
+      const r = await api('/settings', { method: 'PUT', body: { capacity_min: Math.round(+e.target.cap.value * 60) } });
       state.capacity = r.capacity_min;
       toast('Saved');
-      if (!state.members.some((m) => m.name === old)) return renderWhoAmI();
-      render();
     } catch (er) { toast(er.message); }
   };
+  loadHousehold();
+  wireAccountCard();
   $('#notif-on').onclick = enableNotifications;
   $('#open-dict').onclick = () => { state.tab = 'dict'; render(); window.scrollTo(0, 0); };
   wireAiCard();
@@ -857,7 +940,6 @@ function viewSettings() {
     b.onclick = () => { localStorage.setItem('dd_stt', b.dataset.stt); toast(b.dataset.stt === 'whisper' ? 'Using Whisper' : 'Using phone speech'); viewSettings(); };
   });
   $('#install').onclick = async () => { if (installPrompt) { installPrompt.prompt(); installPrompt = null; } };
-  $('#logout').onclick = async () => { await api('/logout', { method: 'POST' }).catch(() => {}); renderLogin(); };
 }
 
 // "AI for voice" card: paste a free Gemini key from the phone; it's checked with Google,
@@ -918,15 +1000,106 @@ function wireAiCard() {
   }
 }
 
-function memberRow(m) {
-  return `<div class="row" style="margin-bottom:6px">
-    <input type="text" class="grow" value="${esc(m.name)}" placeholder="Name" style="flex:1;width:auto">
-    <select style="width:auto">
-      <option value="fixer" ${m.role === 'fixer' ? 'selected' : ''}>Does the work</option>
-      <option value="requester" ${m.role === 'requester' ? 'selected' : ''}>Requests</option>
-    </select>
-    <button type="button" class="btn sm danger" data-rm>✕</button>
-  </div>`;
+// ---- Settings → Household: members, invite link, reset codes ----
+async function loadHousehold() {
+  const box = $('#household');
+  if (!box) return;
+  let list;
+  try { list = (await api('/auth/accounts')).accounts; } catch (e) { box.innerHTML = `<b>👨‍👩‍👧 Household</b><p class="small err">${esc(e.message)}</p>`; return; }
+  box.innerHTML = `
+    <b>👨‍👩‍👧 Household</b>
+    <div style="margin-top:6px">${list.map((u) => `
+      <div class="dict-row">
+        <div class="grow" style="min-width:0"><b>${esc(u.name)}</b>${u.you ? ' <span class="muted small">(you)</span>' : ''}
+          <div class="small muted">@${esc(u.username)} · ${u.role === 'fixer' ? 'does the Do’s' : 'asks for Do’s'}</div></div>
+        ${u.you ? '' : `<button type="button" class="btn sm" data-reset="${u.id}" data-name="${esc(u.name)}">Reset code</button>`}
+      </div>`).join('')}</div>
+    <div id="code-out"></div>
+    <button type="button" class="btn primary block" id="invite" style="margin-top:10px">➕ Invite someone to link their account</button>`;
+  box.querySelectorAll('[data-reset]').forEach((b) => {
+    b.onclick = async () => {
+      try {
+        const r = await api('/auth/reset-code', { method: 'POST', body: { user_id: +b.dataset.reset } });
+        $('#code-out').innerHTML = `<div class="card code-card"><div class="small">Reset code for <b>${esc(r.for)}</b> (works for 24 hours):</div>
+          <div class="code">${esc(r.code)}</div>
+          <div class="small muted">They tap “Forgot your password?” on the sign-in screen and enter it.</div></div>`;
+      } catch (e) { toast(e.message); }
+    };
+  });
+  $('#invite').onclick = async () => {
+    try {
+      const r = await api('/auth/invite', { method: 'POST', body: {} });
+      const msg = `Join me on Daddy-Do, our household Do list: ${r.url}`;
+      $('#code-out').innerHTML = `<div class="card code-card">
+        <div class="small">Send this link. It works once, for 7 days, and links their account to yours as someone who ${r.role === 'fixer' ? 'does the Do’s' : 'asks for Do’s'}.</div>
+        <div class="code small" style="word-break:break-all">${esc(r.url)}</div>
+        <div class="row">
+          ${navigator.share ? '<button type="button" class="btn sm primary" id="inv-share">Share…</button>' : ''}
+          <button type="button" class="btn sm" id="inv-copy">Copy link</button>
+        </div></div>`;
+      const sh = $('#inv-share');
+      if (sh) sh.onclick = () => navigator.share({ title: 'Daddy-Do', text: msg, url: r.url }).catch(() => {});
+      $('#inv-copy').onclick = async () => {
+        try { await navigator.clipboard.writeText(r.url); toast('Link copied'); } catch { toast('Press and hold the link to copy it'); }
+      };
+    } catch (e) { toast(e.message); }
+  };
+}
+
+// ---- Settings → Your account ----
+function accountCard() {
+  const u = state.user || {};
+  return `<form class="card" id="acct">
+    <b>🙂 Your account</b> <span class="muted small">@${esc(u.username || '')}</span>
+    <label for="ac-name">Your name <span class="muted">(shown on Do’s)</span></label>
+    <input type="text" id="ac-name" maxlength="40" value="${esc(u.name || '')}">
+    <label>You are…</label>
+    ${roleChips(u.role)}
+    <details style="margin-top:12px"><summary class="small">Change password</summary>
+      <label for="ac-cur">Current password</label>
+      <input type="password" id="ac-cur" autocomplete="current-password">
+      <label for="ac-new">New password <span class="muted">(8+ characters)</span></label>
+      <input type="password" id="ac-new" autocomplete="new-password" minlength="8">
+    </details>
+    <button class="btn primary block" style="margin-top:12px">Save my account</button>
+    <div class="row spread" style="margin-top:12px">
+      <button type="button" class="btn sm" id="logout">Sign out</button>
+      <button type="button" class="link small" id="logout-all">Sign out on all devices</button>
+    </div>
+  </form>`;
+}
+
+function wireAccountCard() {
+  const f = { role: state.user?.role };
+  wireRoleChips(f);
+  $('#acct').onsubmit = async (e) => {
+    e.preventDefault();
+    const body = { name: $('#ac-name').value, role: f.role };
+    if ($('#ac-new').value) { body.password = $('#ac-new').value; body.current_password = $('#ac-cur').value; }
+    try {
+      const r = await api('/auth/me', { method: 'PATCH', body });
+      state.user = r.user;
+      state.me = r.user.name;
+      localStorage.setItem('dd_me', state.me);
+      const st = await api('/settings');
+      state.members = st.members;
+      await refresh();
+      toast(body.password ? 'Saved. Other devices were signed out.' : 'Saved');
+      render();
+    } catch (er) { toast(er.message); }
+  };
+  $('#logout').onclick = async () => {
+    await api('/auth/logout', { method: 'POST' }).catch(() => {});
+    state.user = null; state.me = '';
+    renderLogin();
+  };
+  $('#logout-all').onclick = async (e) => {
+    const b = e.currentTarget;
+    if (b.dataset.armed !== '1') { b.dataset.armed = '1'; b.textContent = 'Tap again to sign out everywhere'; return; }
+    await api('/auth/logout-everywhere', { method: 'POST' }).catch(() => {});
+    state.user = null; state.me = '';
+    renderLogin();
+  };
 }
 
 // ---------- voice brain-dump: speech → transcript → AI → reviewable tickets ----------

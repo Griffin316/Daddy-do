@@ -44,6 +44,16 @@ She files ─► New ─► (you triage: size + priority) ─► Backlog ─► 
 - **AI provider:** Google **Gemini** (`gemini-3.6-flash`, free tier) is used when `GEMINI_API_KEY` is set. You can override the model with a `GEMINI_MODEL` variable. If only `ANTHROPIC_API_KEY` is set, Claude is used instead. Both providers get the same prompt and JSON schema. On Gemini's free tier, Google may use prompts to improve its products.
 - **Android app:** https://daddy-do.pages.dev/download/daddy-do.apk (⚙︎ Settings shows a download card on Android). See `android/README.md`.
 
+## 👨‍👩‍👧 Accounts
+
+- **One site = one household.** Each person has their own username and password, and the server knows who's signed in through a signed, HttpOnly session cookie (180 days). Every action is attributed to the signed-in account; the phone can't claim to be someone else.
+- **First-time setup:** the first person enters the old household passphrase (`HOUSEHOLD_PIN`) once, which proves they belong, then creates their account.
+- **Linking:** ⚙︎ Settings → Household → **Invite** makes a one-time link (valid 7 days) to text your partner. Opening it shows "Join … on Daddy-Do", and on Android it opens in the app.
+- **Forgot password:** the other member taps **Reset code** next to your name (one use, 24 hours). Enter it on the sign-in screen with a new password; that also signs out your other devices.
+- **Security:** PBKDF2-SHA256 passwords (100k iterations), lockout after 8 wrong tries for 15 minutes, invite and reset codes stored hashed. Changing your password or tapping "Sign out on all devices" ends every other session.
+- **Renaming** yourself in Settings → Your account updates your name on every Do, comment, notification and points entry.
+- API: `/api/auth/*`, see `functions/api/auth/[[path]].js`. Tables `users` and `codes` come from `migrations/003_accounts.sql`.
+
 ## 📱 Phones, foldables and tablets
 
 - **Phone / Pixel Fold folded (< 720 px):** one column. Details, updates and notifications open as a pop-up.

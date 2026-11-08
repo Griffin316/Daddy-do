@@ -160,7 +160,7 @@ async function callClaude(env, userMsg) {
   }
 }
 
-export async function onRequestPost({ request, env }) {
+export async function onRequestPost({ request, env, data }) {
   const gem = await geminiKey(env, env.DB); // Cloudflare secret, or the key saved in the app's Settings
   const provider = gem.key ? 'gemini' : env.ANTHROPIC_API_KEY ? 'claude' : null;
   if (!provider) {
@@ -180,7 +180,7 @@ export async function onRequestPost({ request, env }) {
   const tz = body.tz || 'UTC';
   const today = new Intl.DateTimeFormat('en-CA', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit' }).format(now);
   const weekday = new Intl.DateTimeFormat('en-US', { timeZone: tz, weekday: 'long' }).format(now);
-  const speaker = decodeURIComponent(request.headers.get('x-user') || 'a household member');
+  const speaker = data.user?.name || 'a household member';
 
   const settingsRows = await env.DB.prepare("SELECT key, value FROM settings WHERE key IN ('vocab','dictionary')").all();
   const glossary = aiGlossary(readDictionary(Object.fromEntries(settingsRows.results.map((r) => [r.key, r.value]))));

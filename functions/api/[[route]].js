@@ -30,10 +30,8 @@ const json = (data, status = 200) =>
   new Response(JSON.stringify(data), { status, headers: { 'content-type': 'application/json' } });
 const bad = (msg, status = 400) => json({ error: msg }, status);
 
-function actorOf(request) {
-  const raw = request.headers.get('x-user') || 'Someone';
-  return decodeURIComponent(raw).slice(0, 40);
-}
+// The acting person is the signed-in account (set by _middleware.js), never a client header.
+const actorOf = (data) => data.user?.name || 'Someone';
 
 function addDays(dateStr, days) {
   const d = dateStr ? new Date(dateStr + 'T00:00:00Z') : new Date();
@@ -488,14 +486,7 @@ async function verifyGeminiKey(env, key) {
 async function putSettings(db, request, env) {
   const body = await request.json().catch(() => ({}));
   const stmts = [];
-  if (Array.isArray(body.members)) {
-    const members = body.members
-      .map((m) => ({ name: String(m.name || '').trim().slice(0, 40), role: m.role === 'fixer' ? 'fixer' : 'requester' }))
-      .filter((m) => m.name);
-    if (!members.length) return bad('Need at least one member');
-    stmts.push(db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)')
-      .bind('members', JSON.stringify(members)));
-  }
+  // Members come from accounts now (see /api/auth); body.members is ignored.
   if (body.capacity_min !== undefined) {
     const n = Math.max(0, Math.min(10080, Math.round(Number(body.capacity_min) || 0)));
     stmts.push(db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)')
@@ -537,12 +528,12 @@ async function stats(db) {
 
 // ---------- router ----------
 
-export async function onRequest({ request, env, params }) {
+export async function onRequest({ request, env, params, data }) {
   const db = env.DB;
   if (!db) return bad('D1 binding "DB" is missing', 500);
   const parts = params.route || [];
   const method = request.method;
-  const actor = actorOf(request);
+  const actor = actorOf(data);
   const url = new URL(request.url);
 
   try {

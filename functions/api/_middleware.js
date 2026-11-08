@@ -1,77 +1,44 @@
-// Household auth: one shared passphrase (HOUSEHOLD_PIN) -> signed session cookie.
-// Everything under /api except /api/login and /api/session requires the cookie.
+// Accounts auth: a signed session cookie identifies the signed-in member (lib/auth.js).
+// The member is put on context.data.user; every API route uses it as the acting person,
+// so a phone can no longer just claim to be "Mom" or "Dad".
 
-const COOKIE = 'dd_session';
-const MAX_AGE = 60 * 60 * 24 * 180; // 180 days — stay logged in on your phones
+import { readCookie, readSession } from '../../lib/auth.js';
 
-async function sign(secret, msg) {
-  const key = await crypto.subtle.importKey(
-    'raw', new TextEncoder().encode(secret),
-    { name: 'HMAC', hash: 'SHA-256' }, false, ['sign'],
-  );
-  const sig = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(msg));
-  return btoa(String.fromCharCode(...new Uint8Array(sig)))
-    .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-}
+const json = (data, status = 200) =>
+  new Response(JSON.stringify(data), { status, headers: { 'content-type': 'application/json' } });
 
-function safeEqual(a, b) {
-  if (a.length !== b.length) return false;
-  let r = 0;
-  for (let i = 0; i < a.length; i++) r |= a.charCodeAt(i) ^ b.charCodeAt(i);
-  return r === 0;
-}
-
-function json(data, status = 200, headers = {}) {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: { 'content-type': 'application/json', ...headers },
-  });
-}
-
-function readCookie(request, name) {
-  const raw = request.headers.get('cookie') || '';
-  for (const part of raw.split(';')) {
-    const [k, ...v] = part.trim().split('=');
-    if (k === name) return v.join('=');
-  }
-  return null;
-}
+// Reachable without signing in.
+const PUBLIC = new Set([
+  'GET /api/auth/status',
+  'POST /api/auth/setup',
+  'POST /api/auth/login',
+  'POST /api/auth/logout',
+  'POST /api/auth/join',
+  'POST /api/auth/reset',
+]);
 
 export async function onRequest(context) {
   const { request, env, next } = context;
   const url = new URL(request.url);
-  const pin = env.HOUSEHOLD_PIN;
-  if (!pin) {
-    return json({ error: 'Server not configured: set the HOUSEHOLD_PIN secret.' }, 500);
+  if (!env.SESSION_SECRET && !env.HOUSEHOLD_PIN) {
+    return json({ error: 'Server not configured: set the SESSION_SECRET secret.' }, 500);
   }
-  const secret = (env.SESSION_SECRET || '') + '|' + pin;
-  const expected = await sign(secret, 'daddy-do-session-v1');
 
-  if (url.pathname === '/api/login' && request.method === 'POST') {
-    const body = await request.json().catch(() => ({}));
-    const given = String(body.pin || '');
-    // Compare HMACs of the inputs so timing doesn't leak the PIN.
-    const ok = safeEqual(await sign(secret, 'pin:' + given), await sign(secret, 'pin:' + pin));
-    if (!ok) {
-      await new Promise((r) => setTimeout(r, 800)); // slow down guessing
-      return json({ error: 'Wrong passphrase' }, 401);
+  let user = null;
+  try {
+    const s = await readSession(env, readCookie(request));
+    if (s) {
+      user = await env.DB.prepare('SELECT id, username, name, role, session_v FROM users WHERE id = ?').bind(s.u).first();
+      if (user && user.session_v !== s.v) user = null; // signed out everywhere / password changed
     }
-    return json({ ok: true }, 200, {
-      'set-cookie': `${COOKIE}=${expected}; Path=/; Max-Age=${MAX_AGE}; HttpOnly; Secure; SameSite=Lax`,
-    });
+  } catch {
+    user = null;
   }
+  context.data.user = user;
 
-  if (url.pathname === '/api/logout' && request.method === 'POST') {
-    return json({ ok: true }, 200, {
-      'set-cookie': `${COOKIE}=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax`,
-    });
-  }
-
-  const cookie = readCookie(request, COOKIE);
-  const authed = cookie !== null && safeEqual(cookie, expected);
-
-  if (url.pathname === '/api/session') return json({ authed });
-  if (!authed) return json({ error: 'Not logged in' }, 401);
+  const key = `${request.method} ${url.pathname.replace(/\/+$/, '')}`;
+  const isPublic = PUBLIC.has(key) || (request.method === 'GET' && url.pathname.startsWith('/api/auth/invite/'));
+  if (!user && !isPublic) return json({ error: 'Not logged in' }, 401);
 
   try {
     return await next();
