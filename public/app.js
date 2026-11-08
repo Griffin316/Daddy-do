@@ -811,6 +811,12 @@ function viewSettings() {
       </div>
       <p class="muted small">Whisper large-v3 turbo on Cloudflare: text appears a few seconds after you stop. Phone speech shows words as you talk but makes more mistakes.</p>
     </div>
+    ${/Android/i.test(navigator.userAgent) && !matchMedia('(display-mode: standalone)').matches && !document.referrer.startsWith('android-app://') ? `
+    <div class="card row spread">
+      <div class="grow" style="min-width:0"><b>📲 Get the Android app</b>
+        <div class="muted small">Full-screen app with its own icon. After downloading, open the file and allow the install.</div></div>
+      <a class="btn sm primary" href="/download/daddy-do.apk" download>Download</a>
+    </div>` : ''}
     <div class="card">
       <b>Phone notifications</b>
       <p class="muted small">Get a buzz on this phone when there's an update, even when the app is in the background.</p>

@@ -1,0 +1,10 @@
+[
+  {
+    "relation": ["delegate_permission/common.handle_all_urls"],
+    "target": {
+      "namespace": "android_app",
+      "package_name": "dev.pages.daddy_do.twa",
+      "sha256_cert_fingerprints": ["1E:CB:81:A3:73:14:9F:72:4C:59:61:C7:03:F2:7F:A1:A0:4C:96:66:1C:D9:94:46:C8:9B:1A:94:88:78:53:A2"]
+    }
+  }
+]
