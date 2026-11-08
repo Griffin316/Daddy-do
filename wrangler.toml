@@ -5,8 +5,7 @@ pages_build_output_dir = "public"
 [[d1_databases]]
 binding = "DB"
 database_name = "daddy-do"
-# Replace with the id printed by: npx wrangler d1 create daddy-do
-database_id = "00000000-0000-0000-0000-000000000000"
+database_id = "a5154034-cd1a-4b29-8093-fd512e6f2145"
 
 # Workers AI — Whisper speech-to-text fallback for /api/transcribe
 [ai]
