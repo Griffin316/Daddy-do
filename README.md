@@ -39,7 +39,8 @@ She files ─► New ─► (you triage: size + priority) ─► Backlog ─► 
 
 - **Site:** https://daddy-do.pages.dev. Cloudflare Pages is connected to this repo, so every push to `main` builds (`npm install`) and deploys `public/` and `functions/`.
 - **Database:** D1 `daddy-do` (`a5154034-cd1a-4b29-8093-fd512e6f2145`), plus the Workers AI binding `AI`. Both are defined in `wrangler.toml`.
-- **Secrets (Pages → Settings → Variables and secrets):** `HOUSEHOLD_PIN`, `SESSION_SECRET` and `ANTHROPIC_API_KEY`. Without `ANTHROPIC_API_KEY`, voice-to-Do's parsing is turned off.
+- **Secrets (Pages → Settings → Variables and secrets):** `HOUSEHOLD_PIN`, `SESSION_SECRET` and `GEMINI_API_KEY`. Without an AI key, voice-to-Do's parsing is turned off.
+- **AI provider:** Google **Gemini** (`gemini-3.6-flash`, free tier) is used when `GEMINI_API_KEY` is set. You can override the model with a `GEMINI_MODEL` variable. If only `ANTHROPIC_API_KEY` is set, Claude is used instead. Both providers get the same prompt and JSON schema. On Gemini's free tier, Google may use prompts to improve its products.
 - **Android app:** https://daddy-do.pages.dev/download/daddy-do.apk (⚙︎ Settings shows a download card on Android). See `android/README.md`.
 
 ## 📱 Phones, foldables and tablets

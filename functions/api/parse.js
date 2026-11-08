@@ -1,12 +1,14 @@
 // POST /api/parse { text } -> proposed tickets extracted from a spoken/typed brain dump.
-// Uses Claude with structured outputs so the response is always valid JSON in our schema.
-// Needs the ANTHROPIC_API_KEY secret. Nothing is saved here — the client shows the
+// Provider: Google Gemini when GEMINI_API_KEY is set (free tier), otherwise Claude when
+// ANTHROPIC_API_KEY is set. Both are forced to answer in RESPONSE_SCHEMA, so the reply is
+// always valid JSON in our shape; the prompt, dictionary and post-checks are shared. Nothing is saved here — the client shows the
 // proposals for review and then creates the ones the user keeps via POST /api/tickets.
 
 import Anthropic from '@anthropic-ai/sdk';
-import { readDictionary, claudeGlossary } from '../../lib/dictionary.js';
+import { readDictionary, aiGlossary } from '../../lib/dictionary.js';
 
-const MODEL = 'claude-opus-5-5';
+const CLAUDE_MODEL = 'claude-opus-5-5';
+const GEMINI_MODEL_DEFAULT = 'gemini-3.6-flash'; // stable Flash with a free tier; override with GEMINI_MODEL
 const CATEGORIES = ['repair', 'cleaning', 'yard', 'errand', 'kids', 'admin', 'project', 'general'];
 const SIZES = [15, 30, 60, 180, 480];
 
@@ -70,9 +72,97 @@ The input is a raw speech-to-text transcript: expect run-on sentences, filler wo
 Never invent requests that weren't said.
 The household calls these items "Do's" (one "Do"). In any text a person will read (questions, not_tasks, descriptions), say "Do" or "Do's", never "ticket".`;
 
+class ParseError extends Error {
+  constructor(message, status = 502) { super(message); this.status = status; }
+}
+
+// ---- Gemini (generateContent REST, JSON-schema constrained output) ----
+async function callGemini(env, userMsg) {
+  const model = env.GEMINI_MODEL || GEMINI_MODEL_DEFAULT;
+  const base = env.GEMINI_BASE_URL || 'https://generativelanguage.googleapis.com'; // override only for local tests
+  const url = `${base}/v1beta/models/${encodeURIComponent(model)}:generateContent`;
+  const makeBody = (withThinking) => ({
+    systemInstruction: { parts: [{ text: SYSTEM }] },
+    contents: [{ role: 'user', parts: [{ text: userMsg }] }],
+    generationConfig: {
+      responseMimeType: 'application/json',
+      responseJsonSchema: RESPONSE_SCHEMA,
+      maxOutputTokens: 8192,
+      // Simple extraction: keep reasoning short for speed and to stay inside free-tier token limits.
+      ...(withThinking ? { thinkingConfig: { thinkingLevel: 'LOW' } } : {}),
+    },
+  });
+  const post = (b) => fetch(url, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-goog-api-key': env.GEMINI_API_KEY },
+    body: JSON.stringify(b),
+  });
+
+  let res = await post(makeBody(true));
+  if (res.status === 400) {
+    // Some models reject thinkingConfig; retry once without it.
+    const errText = await res.text();
+    if (/thinking/i.test(errText)) res = await post(makeBody(false));
+    else throw new ParseError(`AI error (400): ${errText.slice(0, 300)}`);
+  }
+  if (res.status === 429) throw new ParseError('Free AI quota used up for now — try again in a minute (daily limits reset at midnight Pacific).', 429);
+  if (res.status === 401 || res.status === 403) throw new ParseError('GEMINI_API_KEY is invalid or not allowed for this model.', 500);
+  if (!res.ok) throw new ParseError(`AI error (${res.status}): ${(await res.text()).slice(0, 300)}`);
+
+  const data = await res.json();
+  if (data.promptFeedback?.blockReason) throw new ParseError("The AI couldn't process that request. Try rephrasing.", 422);
+  const cand = data.candidates?.[0];
+  if (!cand) throw new ParseError('AI returned no answer — try again.');
+  if (cand.finishReason === 'MAX_TOKENS') throw new ParseError('That was too long to process at once — split it up.', 422);
+  if (cand.finishReason && !['STOP', 'FINISH_REASON_UNSPECIFIED'].includes(cand.finishReason)) {
+    throw new ParseError("The AI couldn't process that request. Try rephrasing.", 422);
+  }
+  // Skip any "thought" parts; the answer is the JSON text.
+  const text = (cand.content?.parts || []).filter((p) => !p.thought && typeof p.text === 'string').map((p) => p.text).join('');
+  try {
+    return JSON.parse(text.replace(/^```(?:json)?\s*|\s*```$/g, ''));
+  } catch {
+    throw new ParseError('AI returned an unreadable answer — try again.');
+  }
+}
+
+// ---- Claude (kept as an alternative provider) ----
+async function callClaude(env, userMsg) {
+  const client = new Anthropic({ apiKey: env.ANTHROPIC_API_KEY });
+  let response;
+  try {
+    response = await client.beta.messages.create({
+      model: CLAUDE_MODEL,
+      max_tokens: 16000,
+      betas: ['server-side-fallback-2026-07-01'],
+      fallbacks: 'default',
+      output_config: {
+        effort: 'low', // simple extraction; keeps it fast and cheap
+        format: { type: 'json_schema', schema: RESPONSE_SCHEMA },
+      },
+      system: SYSTEM,
+      messages: [{ role: 'user', content: userMsg }],
+    });
+  } catch (err) {
+    if (err instanceof Anthropic.RateLimitError) throw new ParseError('AI is busy — try again in a minute.', 429);
+    if (err instanceof Anthropic.AuthenticationError) throw new ParseError('ANTHROPIC_API_KEY is invalid.', 500);
+    if (err instanceof Anthropic.APIError) throw new ParseError(`AI error (${err.status}): ${err.message}`);
+    throw new ParseError('Could not reach the AI service.');
+  }
+  if (response.stop_reason === 'refusal') throw new ParseError("The AI couldn't process that request. Try rephrasing.", 422);
+  if (response.stop_reason === 'max_tokens') throw new ParseError('That was too long to process at once — split it up.', 422);
+  const textBlock = response.content.find((b) => b.type === 'text');
+  try {
+    return JSON.parse(textBlock?.text || '');
+  } catch {
+    throw new ParseError('AI returned an unreadable answer — try again.');
+  }
+}
+
 export async function onRequestPost({ request, env }) {
-  if (!env.ANTHROPIC_API_KEY) {
-    return json({ error: 'Voice parsing is not set up: add the ANTHROPIC_API_KEY secret.' }, 503);
+  const provider = env.GEMINI_API_KEY ? 'gemini' : env.ANTHROPIC_API_KEY ? 'claude' : null;
+  if (!provider) {
+    return json({ error: 'Voice parsing is not set up: add the GEMINI_API_KEY secret in Cloudflare.' }, 503);
   }
   const body = await request.json().catch(() => ({}));
   const text = String(body.text || '').trim();
@@ -91,12 +181,12 @@ export async function onRequestPost({ request, env }) {
   const speaker = decodeURIComponent(request.headers.get('x-user') || 'a household member');
 
   const settingsRows = await env.DB.prepare("SELECT key, value FROM settings WHERE key IN ('vocab','dictionary')").all();
-  const glossary = claudeGlossary(readDictionary(Object.fromEntries(settingsRows.results.map((r) => [r.key, r.value]))));
+  const glossary = aiGlossary(readDictionary(Object.fromEntries(settingsRows.results.map((r) => [r.key, r.value]))));
 
   const userMsg = `Today is ${weekday} ${today}.
 Speaker: ${speaker}
 ${glossary ? `\nHousehold dictionary:\n${glossary}\n` : ''}
-Existing open tickets (for duplicate detection):
+Existing open Do's (for duplicate detection):
 ${open.length ? open.map((t) => `#${t.id} ${t.title}`).join('\n') : '(none)'}
 
 Transcript:
@@ -104,40 +194,12 @@ Transcript:
 ${text}
 </transcript>`;
 
-  const client = new Anthropic({ apiKey: env.ANTHROPIC_API_KEY });
-  let response;
-  try {
-    response = await client.beta.messages.create({
-      model: MODEL,
-      max_tokens: 16000,
-      betas: ['server-side-fallback-2026-07-01'],
-      fallbacks: 'default',
-      output_config: {
-        effort: 'low', // simple extraction; keeps it fast and cheap
-        format: { type: 'json_schema', schema: RESPONSE_SCHEMA },
-      },
-      system: SYSTEM,
-      messages: [{ role: 'user', content: userMsg }],
-    });
-  } catch (err) {
-    if (err instanceof Anthropic.RateLimitError) return json({ error: 'AI is busy — try again in a minute.' }, 429);
-    if (err instanceof Anthropic.AuthenticationError) return json({ error: 'ANTHROPIC_API_KEY is invalid.' }, 500);
-    if (err instanceof Anthropic.APIError) return json({ error: `AI error (${err.status}): ${err.message}` }, 502);
-    return json({ error: 'Could not reach the AI service.' }, 502);
-  }
-
-  if (response.stop_reason === 'refusal') {
-    return json({ error: "The AI couldn't process that request. Try rephrasing." }, 422);
-  }
-  if (response.stop_reason === 'max_tokens') {
-    return json({ error: 'That was too long to process at once — split it up.' }, 422);
-  }
-  const textBlock = response.content.find((b) => b.type === 'text');
   let parsed;
   try {
-    parsed = JSON.parse(textBlock?.text || '');
-  } catch {
-    return json({ error: 'AI returned an unreadable answer — try again.' }, 502);
+    parsed = provider === 'gemini' ? await callGemini(env, userMsg) : await callClaude(env, userMsg);
+  } catch (err) {
+    if (err instanceof ParseError) return json({ error: err.message }, err.status);
+    return json({ error: 'Could not reach the AI service.' }, 502);
   }
 
   // Defensive normalisation (schema guarantees shape; we still clamp values).
@@ -158,6 +220,7 @@ ${text}
   })).filter((it) => it.title);
 
   return json({
+    provider,
     items,
     questions: (parsed.questions || []).map(String).slice(0, 5),
     not_tasks: (parsed.not_tasks || []).map(String).slice(0, 10),

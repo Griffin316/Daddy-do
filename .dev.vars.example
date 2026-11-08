@@ -1,5 +1,8 @@
 # Copy to .dev.vars for local dev (gitignored). In production set these as Pages secrets.
 HOUSEHOLD_PIN=change-me-to-a-long-passphrase
 SESSION_SECRET=any-long-random-string
-# Claude API key for /api/parse (voice → tickets). https://console.anthropic.com
-ANTHROPIC_API_KEY=sk-ant-...
+# AI for /api/parse (voice → Do's). Gemini is used when its key is set (free tier at https://aistudio.google.com/apikey);
+# otherwise Claude if ANTHROPIC_API_KEY is set.
+GEMINI_API_KEY=
+# GEMINI_MODEL=gemini-3.6-flash
+# ANTHROPIC_API_KEY=sk-ant-...

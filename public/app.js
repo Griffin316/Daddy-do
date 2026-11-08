@@ -1533,7 +1533,7 @@ async function enableNotifications() {
 }
 
 // ---------- household dictionary: names, mis-hearings and shorthand ----------
-// Spellings + phrases also prime Whisper (server) and act as a glossary for Claude (server).
+// Spellings + phrases also prime Whisper (server) and act as a glossary for the AI parser (server).
 // Here on the phone we fix listed mis-hearings right away and learn new ones from hand edits.
 
 const reEsc = (t) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -1633,7 +1633,7 @@ function viewDictionary() {
   app.innerHTML = `
     <div class="row spread"><h2>📖 Household dictionary</h2>
       <button class="link" id="dict-back">← ${voice.returnToTalk ? 'Back to Talk' : 'Settings'}</button></div>
-    <p class="muted small">Teach the voice transcriber your family's words. Names get spelled right, known mis-hearings are fixed automatically, and Claude expands your shorthand into real jobs.</p>
+    <p class="muted small">Teach the voice transcriber your family's words. Names get spelled right, known mis-hearings are fixed automatically, and the AI expands your shorthand into real jobs.</p>
 
     <form id="df" class="card">
       <b>${ed ? 'Edit entry' : 'Add an entry'}</b>
@@ -1670,7 +1670,7 @@ function viewDictionary() {
       <label for="d-test">Type something the way it might be transcribed</label>
       <input type="text" id="d-test" value="${esc(dictUi.test)}">
       <div class="small" id="d-out" style="margin-top:8px"></div>
-      <p class="muted small">Name fixes happen on the phone right away. Shorthand is expanded by Claude when you tap ✨ Turn into Do’s.</p>
+      <p class="muted small">Name fixes happen on the phone right away. Shorthand is expanded by the AI when you tap ✨ Turn into Do’s.</p>
     </div>`;
 
   const showTest = () => {
@@ -1678,7 +1678,7 @@ function viewDictionary() {
     dictUi.test = v;
     const r = applyDictionary(v);
     const used = state.dictionary.filter((e) => e.kind === 'phrase' && new RegExp(`(^|[^\\p{L}])${reEsc(e.text)}($|[^\\p{L}])`, 'iu').test(r.text));
-    $('#d-out').innerHTML = `→ ${esc(r.text)}${used.length ? `<div class="muted" style="margin-top:4px">Claude will read ${used.map((e) => `“${esc(e.text)}” as <i>${esc(e.means)}</i>`).join('; ')}</div>` : ''}`;
+    $('#d-out').innerHTML = `→ ${esc(r.text)}${used.length ? `<div class="muted" style="margin-top:4px">The AI will read ${used.map((e) => `“${esc(e.text)}” as <i>${esc(e.means)}</i>`).join('; ')}</div>` : ''}`;
   };
   $('#d-test').oninput = showTest;
   showTest();
