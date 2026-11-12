@@ -350,6 +350,7 @@ async function deleteTicket(H, id) {
     H.db.prepare('DELETE FROM comments WHERE ticket_id = ? AND household_id = ?').bind(id, H.hh),
     H.db.prepare('DELETE FROM notifications WHERE ticket_id = ? AND household_id = ?').bind(id, H.hh),
     H.db.prepare('DELETE FROM ticket_threads WHERE ticket_id = ? AND household_id = ?').bind(id, H.hh),
+    H.db.prepare('DELETE FROM search_chunks WHERE ticket_id = ? AND household_id = ?').bind(id, H.hh),
     H.db.prepare('DELETE FROM tickets WHERE id = ? AND household_id = ?').bind(id, H.hh),
   ]);
   return json({ ok: true });

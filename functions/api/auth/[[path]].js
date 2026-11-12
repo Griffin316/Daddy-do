@@ -255,6 +255,7 @@ async function updateMe(env, db, me, body) {
           ['notifications', 'recipient'], ['notifications', 'actor'], ['points', 'member']]) {
           stmts.push(db.prepare(`UPDATE ${table} SET ${col} = ? WHERE household_id = ? AND ${col} = ?`).bind(name, hh, old));
         }
+        stmts.push(db.prepare("UPDATE tickets SET updated_at = datetime('now') WHERE household_id = ?").bind(hh)); // refresh search index
       }
     }
   }

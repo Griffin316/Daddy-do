@@ -77,6 +77,21 @@ Each person connects their **own** Gmail.
 
 Code: `functions/api/gmail/[[path]].js`, `lib/google.js` (OAuth, Gmail REST, MIME), `lib/ai.js` (Gemini/Claude JSON), `lib/extract.js` (text → Do's).
 
+## 🔍 Search
+
+Tap **🔍** in the header.
+- **Search by meaning:** "how much did the plumber charge" finds the faucet Do through its note "$180 to replace the Moen cartridge". It covers finished Do's, every comment, the status history and linked email subjects.
+- **✨ Ask:** answers in a sentence or two, using only your Do's, and cites them as tappable `#12` links.
+
+**How it works:**
+- `lib/search.js` splits each Do into short passages and embeds them with Workers AI `@cf/baai/bge-base-en-v1.5` (Cloudflare-hosted, zero data retention).
+- The embeddings are stored in D1 (`search_chunks`) as normalised int8 vectors.
+- A search embeds the query and scores it against all of the household's passages.
+- Exact words in a passage add a small boost, which helps with names, part numbers and amounts.
+- Do's that changed since the last search are re-indexed automatically at the start of the next one.
+
+On a test household, all 10 everyday questions found the right Do first, in about 0.3–0.5 s. Embeddings cost about $0.07 per million tokens, well inside Workers AI's free daily allowance.
+
 ## 📱 Phones, foldables and tablets
 
 - **Phone / Pixel Fold folded (< 720 px):** one column. Details, updates and notifications open as a pop-up.

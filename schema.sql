@@ -162,3 +162,15 @@ CREATE TABLE IF NOT EXISTS ticket_threads (
   UNIQUE (ticket_id, thread_id)
 );
 CREATE INDEX IF NOT EXISTS idx_ticket_threads_thread ON ticket_threads(household_id, thread_id);
+
+-- Semantic search passages (lib/search.js). vec = normalised int8 embedding, base64 (bge-base-en-v1.5, 768 dims).
+CREATE TABLE IF NOT EXISTS search_chunks (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  household_id INTEGER NOT NULL,
+  ticket_id    INTEGER NOT NULL REFERENCES tickets(id) ON DELETE CASCADE,
+  kind         TEXT    NOT NULL,   -- do | comment | history | email
+  text         TEXT    NOT NULL,
+  vec          TEXT    NOT NULL,
+  indexed_at   TEXT    NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_search_chunks_hh ON search_chunks(household_id, ticket_id);

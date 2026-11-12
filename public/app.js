@@ -113,7 +113,7 @@ const state = {
   ai: { provider: null },
   selectedId: null,
 };
-const HIDDEN_VIEWS = ['dict']; // reachable from Settings / Talk, not in the tab strip
+const HIDDEN_VIEWS = ['dict', 'search']; // reachable from Settings / Talk, not in the tab strip
 
 // ---------- utils ----------
 
@@ -614,9 +614,11 @@ function render() {
   const pts = myTotals();
   $('#who').innerHTML = `
     ${isFixer() || pts.balance ? `<button class="pts-chip" id="pts-chip" title="Your points">⭐ ${pts.balance || 0}</button>` : ''}
+    <button class="bell" id="search-btn" aria-label="Search Do’s">🔍</button>
     <button class="bell" id="bell" aria-label="Notifications">🔔<span class="badge" id="bell-count" hidden></span></button>
     <button class="link me-btn" id="me-btn" aria-label="Your account">${esc(state.me)}</button>`;
   $('#bell').onclick = openNotifications;
+  $('#search-btn').onclick = () => { state.tab = 'search'; render(); window.scrollTo(0, 0); setTimeout(() => $('#s-q')?.focus(), 50); };
   const pc = $('#pts-chip');
   if (pc) pc.onclick = () => { state.tab = 'rewards'; render(); };
   updateBell();
@@ -633,7 +635,7 @@ function render() {
   const views = {
     talk: viewVoice, new: viewNew, mine: viewMine, week: viewWeek, triage: viewTriage,
     backlog: viewBacklog, done: viewDone, all: viewAll, settings: viewSettings, rewards: viewRewards,
-    dict: viewDictionary, email: viewEmail,
+    dict: viewDictionary, email: viewEmail, search: viewSearch,
   };
   (views[state.tab] || viewNew)();
   syncSide();
@@ -2364,6 +2366,57 @@ async function loadTicketEmails(t) {
   box.querySelectorAll('[data-thread]').forEach((b) => { b.onclick = () => openThread(b.dataset.thread, { ticketId: t.id }); });
   const le = $('#t-link-email');
   if (le) le.onclick = () => { state.linkTarget = { id: t.id, title: t.title }; if (modal.open) modal.close(); state.tab = 'email'; render(); window.scrollTo(0, 0); };
+}
+
+// ---------- search: find Do's by meaning, and ask questions about them ----------
+const searchUi = { q: '', results: null, answer: null, loading: '', error: '' };
+
+function viewSearch() {
+  const S = searchUi;
+  const examples = ['plumber’s quote', 'what size is the furnace filter', 'who fixed the back door', 'Costco', 'school forms'];
+  const linkCites = (txt) => esc(txt).replace(/\[#(\d+)\]/g, '<button type="button" class="link cite" data-cite="$1">#$1</button>');
+  app.innerHTML = `
+    <h2>🔍 Search Do’s</h2>
+    <form id="s-f" class="row" style="flex-wrap:nowrap">
+      <input type="search" id="s-q" class="grow" style="flex:1;width:auto" placeholder="What are you looking for?" value="${esc(S.q)}" enterkeyhint="search" autocomplete="off">
+      <button class="btn primary">Search</button>
+    </form>
+    <div class="row" style="margin-top:8px">
+      <button type="button" class="btn sm" id="s-ask" ${S.q ? '' : 'disabled'}>✨ Ask: answer my question</button>
+      <span class="muted small">Searches by meaning, including finished Do’s, notes and linked emails.</span>
+    </div>
+    ${!S.q && !S.results ? `<div class="chips" style="margin-top:12px">${examples.map((e) => `<button type="button" class="chip" data-ex="${esc(e)}">${esc(e)}</button>`).join('')}</div>` : ''}
+    ${S.loading ? `<p class="empty">${esc(S.loading)}</p>` : ''}
+    ${S.error ? `<p class="empty err">${esc(S.error)}</p>` : ''}
+    ${S.answer ? `<div class="card gold-card answer"><b>✨ Answer</b><p style="margin:6px 0 0;white-space:pre-wrap">${linkCites(S.answer.answer)}</p></div>` : ''}
+    ${S.results?.length && !S.results.some((r) => r.strong) && !S.answer ? '<p class="muted small">No strong match. These are the closest:</p>' : ''}
+    <div id="s-results">${S.results ? (S.results.length ? S.results.map((r) => {
+      const t = { ...(state.tickets.find((x) => x.id === r.ticket.id) || {}), ...r.ticket };
+      return `<div class="search-hit">${ticketCard(t)}<div class="snippet small">${r.kind === 'comment' ? '💬' : r.kind === 'email' ? '📧' : r.kind === 'history' ? '🕑' : '📄'} ${esc(r.snippet)}</div></div>`;
+    }).join('') : '<p class="empty">Nothing matched. Try other words.</p>') : ''}</div>`;
+  const go = async (ask) => {
+    S.q = $('#s-q').value.trim();
+    if (!S.q) return;
+    S.error = ''; S.answer = null;
+    S.loading = ask ? '✨ Reading your Do’s…' : 'Searching…';
+    viewSearch();
+    try {
+      if (ask) {
+        const r = await api('/search/ask', { method: 'POST', body: { q: S.q } });
+        S.answer = r; S.results = r.results;
+      } else {
+        S.results = (await api(`/search?q=${encodeURIComponent(S.q)}`)).results;
+      }
+    } catch (e) { S.error = e.message; }
+    S.loading = '';
+    if (state.tab === 'search') viewSearch();
+  };
+  $('#s-f').onsubmit = (e) => { e.preventDefault(); go(false); };
+  $('#s-q').oninput = () => { $('#s-ask').disabled = !$('#s-q').value.trim(); };
+  $('#s-ask').onclick = () => go(true);
+  app.querySelectorAll('[data-ex]').forEach((b) => { b.onclick = () => { $('#s-q').value = b.dataset.ex; go(false); }; });
+  app.querySelectorAll('[data-cite]').forEach((b) => { b.onclick = () => openTicket(+b.dataset.cite); });
+  wireCards(app, {});
 }
 
 // ---------- ticket detail modal ----------

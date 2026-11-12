@@ -176,12 +176,14 @@ async function link(env, db, me, id, body) {
   ).bind(me.household_id, ticket.id, me.id, id, summary.subject.slice(0, 200), summary.correspondent.slice(0, 120)).run();
   await db.prepare("INSERT INTO comments (household_id, ticket_id, author, body, is_system) VALUES (?, ?, ?, ?, 1)")
     .bind(me.household_id, ticket.id, me.name, `📧 Linked email “${summary.subject}” with ${summary.correspondent}`).run();
+  await db.prepare("UPDATE tickets SET updated_at = datetime('now') WHERE id = ?").bind(ticket.id).run();
   return json({ ok: true });
 }
 
 async function unlink(db, me, id, body) {
   await db.prepare('DELETE FROM ticket_threads WHERE household_id = ? AND thread_id = ? AND ticket_id = ?')
     .bind(me.household_id, id, Number(body.ticket_id)).run();
+  await db.prepare("UPDATE tickets SET updated_at = datetime('now') WHERE id = ? AND household_id = ?").bind(Number(body.ticket_id), me.household_id).run();
   return json({ ok: true });
 }
 
@@ -286,6 +288,7 @@ async function reply(env, db, me, id, body) {
       if (ok) {
         stmts.push(db.prepare('INSERT INTO comments (household_id, ticket_id, author, body) VALUES (?, ?, ?, ?)')
           .bind(me.household_id, tid, me.name, `📧 Emailed ${toName}: ${text.slice(0, 280)}${text.length > 280 ? '…' : ''}`));
+        stmts.push(db.prepare("UPDATE tickets SET updated_at = datetime('now') WHERE id = ?").bind(tid));
       }
     }
     if (stmts.length) await db.batch(stmts);
