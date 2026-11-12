@@ -133,3 +133,32 @@ CREATE TABLE IF NOT EXISTS settings (
   value        TEXT    NOT NULL,
   PRIMARY KEY (household_id, key)
 );
+-- Site-wide config set by the site owner (first account), e.g. the Google OAuth client.
+CREATE TABLE IF NOT EXISTS app_config (
+  key   TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+
+-- Each person's own Gmail connection (tokens encrypted with SESSION_SECRET). Email bodies are never stored.
+CREATE TABLE IF NOT EXISTS gmail_accounts (
+  user_id      INTEGER PRIMARY KEY REFERENCES users(id),
+  email        TEXT    NOT NULL,
+  refresh_enc  TEXT    NOT NULL,
+  access_enc   TEXT,
+  access_exp   INTEGER NOT NULL DEFAULT 0,  -- ms since epoch
+  connected_at TEXT    NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Email threads linked to a Do. Only metadata; the chain is read live from the owner's Gmail.
+CREATE TABLE IF NOT EXISTS ticket_threads (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  household_id  INTEGER NOT NULL,
+  ticket_id     INTEGER NOT NULL REFERENCES tickets(id) ON DELETE CASCADE,
+  user_id       INTEGER NOT NULL REFERENCES users(id),  -- whose Gmail the thread is in
+  thread_id     TEXT    NOT NULL,
+  subject       TEXT    NOT NULL DEFAULT '',
+  correspondent TEXT    NOT NULL DEFAULT '',
+  linked_at     TEXT    NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (ticket_id, thread_id)
+);
+CREATE INDEX IF NOT EXISTS idx_ticket_threads_thread ON ticket_threads(household_id, thread_id);

@@ -55,6 +55,28 @@ She files ─► New ─► (you triage: size + priority) ─► Backlog ─► 
 - **Security:** PBKDF2-SHA256 passwords, signed HttpOnly session cookies, lockout after 8 wrong tries for 15 minutes, and invite and reset codes stored hashed.
 - **Code:** `functions/api/auth/[[path]].js` for the endpoints, `functions/api/_middleware.js` for the session and linking gate, `lib/auth.js` and `lib/household.js` for the helpers.
 
+## 📧 Gmail
+
+Each person connects their **own** Gmail.
+- **📧 Email tab:** Inbox, Unread, Linked to Do's, or a Gmail search.
+- **Open a thread** to read the chain, then:
+  - **Make Do's from this:** the AI reads the email and proposes Do's (with who sent it, the prices and the deadlines). You review them, and the ones you add are linked to the thread.
+  - **Link to a Do:** attach the thread to an existing Do.
+  - **✨ Suggest a reply:** the AI drafts a reply based on the linked Do's status, its scheduled day and time, what it's blocked on, and the latest updates. You can add instructions ("accept the quote"). It never makes up prices or dates, and uses `[brackets]` for anything you need to fill in.
+  - **Send** (tap twice) or **Save as Gmail draft**. Replies stay in the same Gmail thread (In-Reply-To/References), with an optional Reply all.
+- **On a Do:** an **📧 Emails** section lists its threads. Sending a reply adds "📧 Emailed Bob: …" to the Do's activity, so the household sees it.
+- **Privacy:**
+  - Email bodies are never stored, only read live from Gmail. D1 keeps only encrypted tokens and, for linked threads, the subject and sender.
+  - Your partner can see the subject and sender of threads you link, but can't open your email.
+  - Email text you ask the AI about goes to Gemini (on the free tier Google may use it to improve its products) or to Claude.
+
+**One-time setup (site owner = the first account), done in the app under ⚙︎ Settings → Gmail:**
+1. Create a Google Cloud project and enable the **Gmail API**.
+2. In **Google Auth Platform**, set Audience to External and add the scopes `gmail.readonly` and `gmail.compose`. Then tap **Publish app** (In production): while an app is in "Testing", Google expires Gmail access every 7 days. A personal app with fewer than 100 users doesn't need verification; you tap through the "unverified app" screen when you connect.
+3. Create a **Web application** OAuth client with the redirect URI `https://daddy-do.pages.dev/api/gmail/callback`, then paste the Client ID and secret into the app. The secret is stored encrypted. You can set `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` as Cloudflare secrets instead.
+
+Code: `functions/api/gmail/[[path]].js`, `lib/google.js` (OAuth, Gmail REST, MIME), `lib/ai.js` (Gemini/Claude JSON), `lib/extract.js` (text → Do's).
+
 ## 📱 Phones, foldables and tablets
 
 - **Phone / Pixel Fold folded (< 720 px):** one column. Details, updates and notifications open as a pop-up.

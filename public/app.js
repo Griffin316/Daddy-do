@@ -11,7 +11,7 @@ const layout = $('#layout');
 // the left and details, updates and notifications open on the right. Folded phones keep
 // the pop-up dialog. In "book" posture the two panes line up with the hinge (CSS).
 const wideMQ = window.matchMedia('(min-width: 720px)');
-const LIST_VIEWS = ['week', 'triage', 'backlog', 'done', 'all', 'mine'];
+const LIST_VIEWS = ['week', 'triage', 'backlog', 'done', 'all', 'mine', 'email'];
 let modalBody = $('#modal-body'); // whichever container the sheet is currently drawing into
 const sideActive = () => wideMQ.matches && LIST_VIEWS.includes(state.tab);
 const inSide = () => modalBody === side;
@@ -54,6 +54,8 @@ function syncSide() {
   layout.classList.add('has-side');
   if (state.selectedId) {
     if (side.dataset.showing !== `ticket:${state.selectedId}` && side.dataset.showing !== `update:${state.selectedId}`) openTicket(state.selectedId);
+  } else if (state.openThread && side.dataset.showing === `thread:${state.openThread}`) {
+    // keep the open email thread
   } else if (side.dataset.showing !== 'notifs') {
     showSideDefault();
   }
@@ -324,6 +326,13 @@ async function boot() {
     state.capacity = settings.capacity_min;
     state.dictionary = settings.dictionary || [];
     state.ai = settings.ai || { provider: null };
+    await loadGmailConfig();
+    const gm = params.get('gmail');
+    if (gm) {
+      history.replaceState(null, '', '/');
+      if (GMAIL_RETURN[gm]) setTimeout(() => toast(GMAIL_RETURN[gm]), 400);
+      state.tab = gm === 'connected' ? 'email' : 'settings';
+    }
     await refresh();
     render();
     // Deep link from a tapped Android notification: /?ticket=123
@@ -577,6 +586,7 @@ function tabsFor() {
       ['week', 'This week', week],
       ['triage', 'Triage', untriaged, true],
       ['talk', '🎙 Talk'],
+      ...(state.gmail?.connected ? [['email', '📧 Email']] : []),
       ['backlog', 'Backlog', open.filter((t) => t.status !== 'new' && t.sprint_week !== THIS_WEEK()).length],
       ['new', '+ New'],
       ['done', 'Done'],
@@ -586,6 +596,7 @@ function tabsFor() {
   }
   return [
     ['talk', '🎙 Talk'],
+    ...(state.gmail?.connected ? [['email', '📧 Email']] : []),
     ['new', '+ Type it'],
     ['mine', 'My requests', toVerify, toVerify > 0],
     ['week', "This week's plan", week],
@@ -616,13 +627,13 @@ function render() {
   nav.innerHTML = tabs.map(([k, label, n, hot]) => `<button data-tab="${k}" class="${k === state.tab ? 'active' : ''}">
     ${esc(label)}${n ? ` <span class="${hot ? 'badge' : 'muted small'}">${n}</span>` : ''}</button>`).join('');
   nav.querySelectorAll('[data-tab]').forEach((b) => {
-    b.onclick = () => { state.tab = b.dataset.tab; render(); window.scrollTo(0, 0); };
+    b.onclick = () => { if (state.tab !== b.dataset.tab) { state.openThread = null; state.linkTarget = null; } state.tab = b.dataset.tab; render(); window.scrollTo(0, 0); };
   });
 
   const views = {
     talk: viewVoice, new: viewNew, mine: viewMine, week: viewWeek, triage: viewTriage,
     backlog: viewBacklog, done: viewDone, all: viewAll, settings: viewSettings, rewards: viewRewards,
-    dict: viewDictionary,
+    dict: viewDictionary, email: viewEmail,
   };
   (views[state.tab] || viewNew)();
   syncSide();
@@ -642,6 +653,7 @@ function ticketCard(t, actions = []) {
     t.points_earned ? `<b class="gold">⭐ ${t.points_earned}</b>` : (isFixer() && OPEN.includes(t.status) && t.estimate_min ? `<span class="muted">☆ ${pointsFor(t)} pts</span>` : ''),
     t.recur_days ? `🔁 every ${t.recur_days}d` : '',
     t.comment_count ? `💬 ${t.comment_count}` : '',
+    t.email_count ? `📧 ${t.email_count}` : '',
     `#${t.id} · ${esc(t.requester)} · ${ago(t.created_at)}`,
   ].filter(Boolean).map((x) => `<span>${x}</span>`).join('');
   const blocked = t.status === 'blocked' && t.blocked_reason
@@ -990,6 +1002,7 @@ function viewSettings() {
       <button class="btn primary block" style="margin-top:12px">Save</button>
     </form>
     ${state.ai?.provider ? aiCard() : ''}
+    ${gmailCard()}
     <div class="card row spread">
       <div class="grow" style="min-width:0"><b>📖 Household dictionary</b>
         <div class="muted small">${state.dictionary.length ? `${state.dictionary.length} names, words &amp; phrases` : 'Teach it names (Dr. Saan), and shorthand ("the usual")'}</div></div>
@@ -1031,6 +1044,7 @@ function viewSettings() {
   $('#notif-on').onclick = enableNotifications;
   $('#open-dict').onclick = () => { state.tab = 'dict'; render(); window.scrollTo(0, 0); };
   wireAiCard();
+  wireGmailCard();
   $('#stt').querySelectorAll('[data-stt]').forEach((b) => {
     b.onclick = () => { localStorage.setItem('dd_stt', b.dataset.stt); toast(b.dataset.stt === 'whisper' ? 'Using Whisper' : 'Using phone speech'); viewSettings(); };
   });
@@ -1522,7 +1536,8 @@ function viewVoiceReview() {
   app.innerHTML = `
     <div class="row spread"><h2>${items.length} ${items.length === 1 ? 'Do' : 'Do’s'} found</h2>
       <button class="link" id="back">← Edit transcript</button></div>
-    <p class="muted small">Untick anything you don't want, tweak, then file. ${isFixer() ? `Filed as requested by <b>${esc(voice.requester)}</b>.` : ''}</p>
+    ${voice.thread ? `<div class="card invite-card small">📧 From the email <b>${esc(voice.thread.subject)}</b> with ${esc(voice.thread.correspondent)}. The Do’s you add get linked to it.</div>` : ''}
+    <p class="muted small">Untick anything you don't want, tweak, then file. ${isFixer() && !voice.thread ? `Filed as requested by <b>${esc(voice.requester)}</b>.` : ''}</p>
     ${(voice.learn || []).length ? `<div class="card learn"><b>📖 Remember your corrections?</b>
       <p class="muted small">You fixed these in the transcript. Save them and they'll be corrected automatically next time.</p>
       ${voice.learn.map((l, i) => `<div class="row spread learn-row"><span class="small"><s>${esc(l.heard)}</s> → <b>${esc(l.text)}</b></span>
@@ -1556,7 +1571,11 @@ function viewVoiceReview() {
     <button class="btn primary block" id="file" ${kept ? '' : 'disabled'}>Add ${kept} ${kept === 1 ? 'Do' : 'Do’s'} · ~${fmtMin(mins)}</button>
     <button class="btn block" id="discard" style="margin-top:8px">Discard</button>`;
 
-  $('#back').onclick = () => { voice.result = null; viewVoice(); };
+  $('#back').onclick = () => {
+    const th = voice.thread;
+    voice.result = null; voice.thread = null;
+    if (th) { state.tab = 'email'; render(); openThread(th.id); } else viewVoice();
+  };
   app.querySelectorAll('[data-learn]').forEach((b) => {
     b.onclick = async () => {
       const l = voice.learn[+b.dataset.learn];
@@ -1594,11 +1613,16 @@ function viewVoiceReview() {
           },
         });
         state.tickets.unshift({ ...r.ticket, comment_count: 0 });
+        if (voice.thread) {
+          await api(`/gmail/threads/${encodeURIComponent(voice.thread.id)}/link`, { method: 'POST', body: { ticket_id: r.ticket.id } }).catch(() => {});
+        }
         ok++;
       } catch (e) { toast(e.message); }
     }
-    toast(`Added ${ok} ${ok === 1 ? 'Do' : 'Do’s'} 🎉`);
+    toast(`Added ${ok} ${ok === 1 ? 'Do' : 'Do’s'} 🎉${voice.thread ? ' (linked to the email)' : ''}`);
     voice.result = null;
+    voice.thread = null;
+    await refresh();
     voice.transcript = '';
     api('/stats').then((s) => { state.stats = s.stats; });
     state.tab = isFixer() ? 'triage' : 'mine';
@@ -2032,6 +2056,316 @@ function viewDictionary() {
   });
 }
 
+// ---------- Gmail: each person's inbox, threads linked to Do's, AI replies ----------
+// Email chains are read live from Gmail through /api/gmail; nothing but thread links is stored.
+
+const fmtTs = (ms) => {
+  if (!ms) return '';
+  const d = new Date(ms);
+  return isoDate(d) === isoDate(new Date())
+    ? d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })
+    : d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+};
+
+const GMAIL_RETURN = {
+  connected: '📧 Gmail connected',
+  denied: 'Gmail wasn’t connected (permission was declined).',
+  scopes: 'Please allow both “read” and “send” Gmail access, then try again.',
+  no_refresh: 'Google didn’t grant lasting access. Remove Daddy-Do at myaccount.google.com/permissions and connect again.',
+  expired: 'That took too long. Tap Connect Gmail again.',
+  not_configured: 'Gmail isn’t set up on this site yet.',
+  failed: 'Couldn’t finish connecting Gmail. Try again.',
+};
+
+async function loadGmailConfig() {
+  try { state.gmail = await api('/gmail/config'); } catch { state.gmail = null; }
+}
+
+// Errors that mean "connect again": refresh the card / config so the UI shows Connect.
+async function gmailCall(path, opts) {
+  try {
+    return await api(path, opts);
+  } catch (e) {
+    if (/Connect (your )?Gmail|Tap Connect Gmail/.test(e.message)) await loadGmailConfig();
+    throw e;
+  }
+}
+
+// ---- Settings card ----
+function gmailCard() {
+  const g = state.gmail;
+  if (!g) return '';
+  let inner;
+  if (!g.configured) {
+    inner = g.is_owner ? `
+      <p class="small">One-time setup so Daddy-Do can use Gmail. It’s free and takes about 10 minutes in Google Cloud. You can do it on your phone.</p>
+      <ol class="small steps-list">
+        <li>Open <a href="https://console.cloud.google.com/projectcreate" target="_blank" rel="noopener">console.cloud.google.com</a> and create a project called <b>Daddy-Do</b>.</li>
+        <li>Open <a href="https://console.cloud.google.com/apis/library/gmail.googleapis.com" target="_blank" rel="noopener">Gmail API</a> and tap <b>Enable</b>.</li>
+        <li>Go to <a href="https://console.cloud.google.com/auth/branding" target="_blank" rel="noopener">Google Auth Platform</a> → <b>Get started</b>: app name <b>Daddy-Do</b>, your email, Audience <b>External</b>.</li>
+        <li>Under <b>Data access</b>, add the scopes <code>gmail.readonly</code> and <code>gmail.compose</code>.</li>
+        <li>Under <b>Audience</b>, tap <b>Publish app</b> (In production). Otherwise Google cuts Gmail access every 7 days. You’ll see an “unverified app” notice when connecting: that’s normal for a personal app.</li>
+        <li>Under <b>Clients</b> → <b>Create client</b> → <b>Web application</b>. Add this <b>Authorized redirect URI</b>:
+          <div class="code small" style="word-break:break-all">${esc(g.redirect_uri)}</div>
+          <button type="button" class="btn sm" id="g-copy-uri">Copy</button></li>
+        <li>Copy the <b>Client ID</b> and <b>Client secret</b> into the boxes below.</li>
+      </ol>
+      <label for="g-cid">Client ID</label>
+      <input type="text" id="g-cid" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="1234…apps.googleusercontent.com">
+      <label for="g-csec">Client secret</label>
+      <input type="password" id="g-csec" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="GOCSPX-…">
+      <button type="button" class="btn primary block" id="g-save" style="margin-top:10px">Save Google setup</button>
+      <p class="muted small">The secret is stored encrypted and never shown again.</p>`
+      : '<p class="small muted">Gmail isn’t set up on this site yet. The site owner (whoever created the first account) can do it from their Settings.</p>';
+  } else if (!g.connected) {
+    inner = `
+      <p class="small">Connect your own Gmail to turn emails into Do’s and reply from a Do, with an AI-suggested answer.</p>
+      <button type="button" class="btn primary block" id="g-connect">📧 Connect Gmail</button>
+      <p class="muted small">Google will show an “unverified app” notice: tap <b>Advanced</b> → <b>Go to Daddy-Do</b>, then allow both read and send. Only you can see your email.</p>`;
+  } else {
+    inner = `
+      <div class="small">✓ Connected as <b>${esc(g.connected.email)}</b></div>
+      <p class="muted small">Only you can read your email. Your household sees just the subject and sender of emails you link to a Do.
+        Email text you ask the AI about is sent to ${g.ai === 'claude' ? 'Claude' : 'Gemini'}${g.ai === 'gemini' ? ' (on Google’s free tier it may be used to improve their products)' : ''}.</p>
+      <div class="row"><button type="button" class="btn sm" id="g-open">Open Email</button>
+      <button type="button" class="btn sm danger" id="g-disconnect">Disconnect</button></div>`;
+  }
+  return `<div class="card" id="gmail-card"><b>📧 Gmail</b>${inner}</div>`;
+}
+
+function wireGmailCard() {
+  const save = $('#g-save');
+  if (save) {
+    save.onclick = async () => {
+      save.disabled = true;
+      try {
+        await api('/gmail/config', { method: 'PUT', body: { client_id: $('#g-cid').value, client_secret: $('#g-csec').value } });
+        await loadGmailConfig();
+        toast('Google setup saved. Now tap Connect Gmail.');
+        viewSettings();
+      } catch (e) { toast(e.message); save.disabled = false; }
+    };
+  }
+  const cp = $('#g-copy-uri');
+  if (cp) cp.onclick = async () => { try { await navigator.clipboard.writeText(state.gmail.redirect_uri); toast('Copied'); } catch { toast('Press and hold to copy'); } };
+  const c = $('#g-connect');
+  if (c) c.onclick = () => { location.href = '/api/gmail/connect'; };
+  const o = $('#g-open');
+  if (o) o.onclick = () => { state.tab = 'email'; render(); };
+  const d = $('#g-disconnect');
+  if (d) {
+    d.onclick = async () => {
+      if (d.dataset.armed !== '1') { d.dataset.armed = '1'; d.textContent = 'Tap again to disconnect'; return; }
+      await api('/gmail/disconnect', { method: 'POST' }).catch(() => {});
+      await loadGmailConfig();
+      toast('Gmail disconnected');
+      viewSettings();
+    };
+  }
+}
+
+// ---- Email tab ----
+const mailUi = { view: 'inbox', q: '', threads: null, loading: false, error: '' };
+
+async function viewEmail() {
+  const target = state.linkTarget;
+  const draw = () => {
+    app.innerHTML = `
+      <h2>📧 Email <span class="muted small">${esc(state.gmail?.connected?.email || '')}</span></h2>
+      ${target ? `<div class="card invite-card row spread"><span class="small">Pick the email to link to <b>${esc(target.title)}</b></span>
+        <button type="button" class="btn sm" id="m-cancel-link">Cancel</button></div>` : ''}
+      <div class="chips" id="m-views">
+        ${[['inbox', 'Inbox'], ['unread', 'Unread'], ['linked', 'Linked to Do’s']].map(([k, l]) =>
+          `<button type="button" class="chip ${mailUi.view === k && !mailUi.q ? 'on' : ''}" data-v="${k}">${l}</button>`).join('')}
+      </div>
+      <form id="m-search" class="row" style="margin:10px 0">
+        <input type="text" id="m-q" class="grow" style="flex:1;width:auto" placeholder="Search Gmail (e.g. plumber, from:school)" value="${esc(mailUi.q)}">
+        <button class="btn">Search</button>
+      </form>
+      <div id="m-list">${mailUi.loading ? '<p class="empty">Loading your email…</p>'
+        : mailUi.error ? `<p class="empty">${esc(mailUi.error)}</p>`
+          : !mailUi.threads?.length ? '<p class="empty">No emails here.</p>'
+            : mailUi.threads.map((t) => `
+        <div class="card mail-row ${t.unread ? 'unread' : ''} ${state.openThread === t.id ? 'sel' : ''}" data-th="${esc(t.id)}">
+          <div class="row spread" style="flex-wrap:nowrap"><b class="grow ellipsis">${t.unread ? '● ' : ''}${esc(t.correspondent)}${t.count > 1 ? ` <span class="muted small">(${t.count})</span>` : ''}</b>
+            <span class="muted small" style="white-space:nowrap">${fmtTs(t.ts)}</span></div>
+          <div class="ellipsis">${esc(t.subject)}</div>
+          <div class="muted small ellipsis">${t.last_from_me ? 'You: ' : ''}${esc(t.snippet)}</div>
+          ${t.dos.length ? `<div class="small" style="margin-top:4px">${t.dos.map((d) => `<span class="do-chip">🔗 ${esc(d.title)}</span>`).join(' ')}</div>` : ''}
+        </div>`).join('')}</div>`;
+    app.querySelectorAll('[data-v]').forEach((b) => { b.onclick = () => { mailUi.view = b.dataset.v; mailUi.q = ''; load(); }; });
+    $('#m-search').onsubmit = (e) => { e.preventDefault(); mailUi.q = $('#m-q').value.trim(); load(); };
+    const cl = $('#m-cancel-link');
+    if (cl) cl.onclick = () => { state.linkTarget = null; viewEmail(); };
+    app.querySelectorAll('[data-th]').forEach((el) => {
+      el.onclick = async () => {
+        const id = el.dataset.th;
+        if (state.linkTarget) {
+          try {
+            await gmailCall(`/gmail/threads/${encodeURIComponent(id)}/link`, { method: 'POST', body: { ticket_id: state.linkTarget.id } });
+            toast('🔗 Email linked to the Do');
+            const tid = state.linkTarget.id;
+            state.linkTarget = null;
+            await refresh();
+            render();
+            openTicket(tid);
+          } catch (e) { toast(e.message); }
+          return;
+        }
+        openThread(id);
+      };
+    });
+  };
+  const load = async () => {
+    mailUi.loading = true; mailUi.error = ''; draw();
+    try {
+      const r = await gmailCall(`/gmail/threads?view=${mailUi.view}&q=${encodeURIComponent(mailUi.q)}`);
+      mailUi.threads = r.threads;
+    } catch (e) { mailUi.error = e.message; }
+    mailUi.loading = false;
+    if (state.tab === 'email') draw();
+  };
+  if (!state.gmail?.connected) {
+    app.innerHTML = `<h2>📧 Email</h2>${gmailCard()}`;
+    wireGmailCard();
+    return;
+  }
+  if (mailUi.threads === null || target) load(); else draw();
+}
+
+// ---- one thread: chain, Do links, AI reply ----
+async function openThread(id, { ticketId } = {}) {
+  state.openThread = id;
+  sheetOpen(`thread:${id}`);
+  if (state.tab === 'email') app.querySelectorAll('[data-th]').forEach((el) => el.classList.toggle('sel', el.dataset.th === id));
+  modalBody.innerHTML = '<p class="muted">Opening email…</p>';
+  let th;
+  try { th = await gmailCall(`/gmail/threads/${encodeURIComponent(id)}`); } catch (e) { modalBody.innerHTML = `<p class="err">${esc(e.message)}</p><button class="btn" id="th-close">Close</button>`; $('#th-close').onclick = closeThread; return; }
+  const baseDo = ticketId || th.dos[0]?.id || '';
+  const openDos = state.tickets.filter((t) => OPEN.includes(t.status) || t.id === ticketId);
+  const msgs = th.messages;
+  modalBody.innerHTML = `
+    <div class="row spread" style="flex-wrap:nowrap"><b class="grow">${esc(th.subject)}</b><button class="btn sm" id="th-close" aria-label="Close">✕</button></div>
+    <div class="small muted">with ${esc(th.correspondent)} · ${th.count} message${th.count === 1 ? '' : 's'}</div>
+    ${th.dos.length ? `<div class="row" style="margin-top:8px">${th.dos.map((d) => `<button type="button" class="do-chip link-chip" data-do="${d.id}">🔗 ${esc(d.title)}</button>`).join('')}</div>` : ''}
+    <div class="mail-chain">
+      ${msgs.length > 3 ? `<details class="small muted"><summary>${msgs.length - 2} earlier messages</summary>${msgs.slice(0, -2).map(msgHtml).join('')}</details>` : msgs.slice(0, -2).map(msgHtml).join('')}
+      ${msgs.slice(-2).map(msgHtml).join('')}
+    </div>
+    <div class="row" style="margin-top:10px">
+      <button type="button" class="btn sm primary" id="th-dos">➕ Make Do’s from this</button>
+      <select id="th-link-sel" class="grow" style="flex:1;width:auto;min-width:0">
+        <option value="">🔗 Link to a Do…</option>
+        ${openDos.filter((t) => !th.dos.some((d) => d.id === t.id)).map((t) => `<option value="${t.id}">${esc(t.title)}</option>`).join('')}
+      </select>
+    </div>
+    <h3>Reply</h3>
+    <label for="th-do">Base the reply on</label>
+    <select id="th-do">
+      <option value="">Just this email</option>
+      ${[...new Map([...th.dos.map((d) => [d.id, d.title]), ...openDos.map((t) => [t.id, t.title])])].map(([did, title]) =>
+        `<option value="${did}" ${String(did) === String(baseDo) ? 'selected' : ''}>Do: ${esc(title)}</option>`).join('')}
+    </select>
+    <input type="text" id="th-instr" style="margin-top:8px" maxlength="500" placeholder="Optional: what to say (e.g. “Saturday 10am works, ask for a quote”)">
+    <button type="button" class="btn block" id="th-suggest" style="margin-top:8px">✨ Suggest a reply</button>
+    <div id="th-notes"></div>
+    <textarea id="th-body" rows="9" style="margin-top:8px" placeholder="Write your reply, or tap Suggest."></textarea>
+    <label class="small row" style="gap:6px;margin-top:6px"><input type="checkbox" id="th-all"> Reply all</label>
+    <div class="row" style="margin-top:8px">
+      <button type="button" class="btn" id="th-draft">Save as Gmail draft</button>
+      <button type="button" class="btn primary grow" id="th-send">Send</button>
+    </div>
+    <p class="muted small" id="th-to"></p>`;
+
+  $('#th-close').onclick = closeThread;
+  modalBody.querySelectorAll('[data-do]').forEach((b) => { b.onclick = () => openTicket(+b.dataset.do); });
+  $('#th-link-sel').onchange = async (e) => {
+    const tid = +e.target.value;
+    if (!tid) return;
+    try {
+      await gmailCall(`/gmail/threads/${encodeURIComponent(id)}/link`, { method: 'POST', body: { ticket_id: tid } });
+      toast('🔗 Linked');
+      await refresh();
+      openThread(id, { ticketId: tid });
+    } catch (er) { toast(er.message); }
+  };
+  $('#th-dos').onclick = async (e) => {
+    const b = e.currentTarget;
+    b.disabled = true; b.textContent = '✨ Reading the email…';
+    try {
+      const r = await gmailCall(`/gmail/threads/${encodeURIComponent(id)}/dos`, { method: 'POST', body: { tz: Intl.DateTimeFormat().resolvedOptions().timeZone } });
+      r.items.forEach((it) => { it.keep = !it.duplicate_of; });
+      voice.result = r;
+      voice.thread = r.thread;
+      voice.requester = state.me;
+      closeThread();
+      state.tab = 'talk';
+      render();
+      if (!r.items.length) toast('No Do’s found in that email');
+    } catch (er) { toast(er.message); b.disabled = false; b.textContent = '➕ Make Do’s from this'; }
+  };
+  $('#th-suggest').onclick = async (e) => {
+    const b = e.currentTarget;
+    b.disabled = true; b.textContent = '✨ Writing a reply…';
+    try {
+      const r = await gmailCall(`/gmail/threads/${encodeURIComponent(id)}/suggest`, {
+        method: 'POST', body: { ticket_id: +$('#th-do').value || null, instructions: $('#th-instr').value },
+      });
+      $('#th-body').value = r.body;
+      $('#th-to').textContent = `To: ${r.to} · ${r.subject}`;
+      $('#th-notes').innerHTML = r.notes.length ? `<div class="card gold-card small"><b>Check before sending:</b><ul>${r.notes.map((n) => `<li>${esc(n)}</li>`).join('')}</ul></div>` : '';
+    } catch (er) { toast(er.message); }
+    b.disabled = false; b.textContent = '✨ Suggest again';
+  };
+  const send = async (mode, btn) => {
+    const text = $('#th-body').value.trim();
+    if (!text) return toast('Write or suggest a reply first');
+    if (mode === 'send' && btn.dataset.armed !== '1') { btn.dataset.armed = '1'; btn.textContent = 'Tap again to send'; return; }
+    btn.disabled = true;
+    try {
+      const r = await gmailCall(`/gmail/threads/${encodeURIComponent(id)}/reply`, {
+        method: 'POST', body: { body: text, mode, reply_all: $('#th-all').checked, ticket_id: +$('#th-do').value || null },
+      });
+      toast(mode === 'send' ? `📧 Sent to ${r.to.replace(/<.*>/, '').trim() || r.to}` : '📝 Saved in Gmail drafts');
+      if (mode === 'send') { await refresh(); render(); openThread(id, { ticketId }); } else { btn.disabled = false; }
+    } catch (er) { toast(er.message); btn.disabled = false; btn.dataset.armed = ''; btn.textContent = mode === 'send' ? 'Send' : 'Save as Gmail draft'; }
+  };
+  $('#th-send').onclick = (e) => send('send', e.currentTarget);
+  $('#th-draft').onclick = (e) => send('draft', e.currentTarget);
+}
+
+function msgHtml(m) {
+  return `<div class="mail-msg ${m.from_me ? 'me' : ''}">
+    <div class="row spread" style="flex-wrap:nowrap"><b class="small ellipsis">${m.from_me ? 'You' : esc(m.from_name)}</b><span class="muted small" style="white-space:nowrap">${fmtTs(m.ts)}</span></div>
+    <div class="mail-text">${esc(m.text || '(no text)')}</div>
+    ${m.attachments.length ? `<div class="muted small">📎 ${m.attachments.map(esc).join(', ')}</div>` : ''}
+  </div>`;
+}
+
+function closeThread() {
+  state.openThread = null;
+  if (inSide()) { side.dataset.showing = ''; app.querySelectorAll('[data-th]').forEach((el) => el.classList.remove('sel')); showSideDefault(); } else sheetClose();
+}
+
+// ---- Emails section inside a Do ----
+async function loadTicketEmails(t) {
+  const box = $('#t-emails');
+  if (!box) return;
+  let r;
+  try { r = await api(`/gmail/ticket/${t.id}`); } catch { box.innerHTML = ''; return; }
+  const connected = !!state.gmail?.connected;
+  box.innerHTML = `${r.threads.map((x) => `
+    <div class="dict-row">
+      <div class="grow" style="min-width:0"><b class="ellipsis" style="display:block">${esc(x.subject)}</b>
+        <div class="small muted">with ${esc(x.correspondent)}${x.mine ? '' : ` · in ${esc(x.owner)}’s Gmail`}</div></div>
+      ${x.mine && connected ? `<button type="button" class="btn sm primary" data-thread="${esc(x.thread_id)}">Open · reply</button>` : ''}
+    </div>`).join('') || '<p class="muted small">No emails linked.</p>'}
+    ${connected ? '<button type="button" class="btn sm" id="t-link-email" style="margin-top:6px">🔗 Link an email</button>' : ''}`;
+  box.querySelectorAll('[data-thread]').forEach((b) => { b.onclick = () => openThread(b.dataset.thread, { ticketId: t.id }); });
+  const le = $('#t-link-email');
+  if (le) le.onclick = () => { state.linkTarget = { id: t.id, title: t.title }; if (modal.open) modal.close(); state.tab = 'email'; render(); window.scrollTo(0, 0); };
+}
+
 // ---------- ticket detail modal ----------
 
 async function openTicket(id) {
@@ -2091,6 +2425,7 @@ async function openTicket(id) {
         ${fx ? '<button type="button" class="btn danger" id="del">Delete</button>' : ''}
       </div>
     </form>
+    ${state.gmail?.configured ? '<h3>📧 Emails</h3><div id="t-emails"><p class="muted small">Loading…</p></div>' : ''}
     <h3>Activity</h3>
     <div id="comments">
       ${data.comments.map((c) => `<div class="comment ${c.is_system ? 'sys' : ''}">
@@ -2102,6 +2437,7 @@ async function openTicket(id) {
     </form>`;
 
   $('#mclose').onclick = () => sheetClose();
+  loadTicketEmails(t);
   const mu = $('#mupd');
   if (mu) mu.onclick = () => openUpdate(state.tickets.find((x) => x.id === t.id) || t);
   $('#ef').onsubmit = async (e) => {

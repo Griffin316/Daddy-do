@@ -123,7 +123,8 @@ const LIST_COLUMNS = `t.*,
   (SELECT COUNT(*) FROM comments c WHERE c.ticket_id = t.id AND c.is_system = 0) AS comment_count,
   (SELECT c.author || ': ' || c.body FROM comments c WHERE c.ticket_id = t.id AND c.is_system = 0
      ORDER BY c.id DESC LIMIT 1) AS last_update,
-  (SELECT COALESCE(SUM(p.points), 0) FROM points p WHERE p.ticket_id = t.id AND p.points > 0) AS points_earned`;
+  (SELECT COALESCE(SUM(p.points), 0) FROM points p WHERE p.ticket_id = t.id AND p.points > 0) AS points_earned,
+  (SELECT COUNT(*) FROM ticket_threads tt WHERE tt.ticket_id = t.id) AS email_count`;
 
 async function listTickets(H, url) {
   const includeClosed = url.searchParams.get('closed') === '1';
@@ -348,6 +349,7 @@ async function deleteTicket(H, id) {
   await H.db.batch([
     H.db.prepare('DELETE FROM comments WHERE ticket_id = ? AND household_id = ?').bind(id, H.hh),
     H.db.prepare('DELETE FROM notifications WHERE ticket_id = ? AND household_id = ?').bind(id, H.hh),
+    H.db.prepare('DELETE FROM ticket_threads WHERE ticket_id = ? AND household_id = ?').bind(id, H.hh),
     H.db.prepare('DELETE FROM tickets WHERE id = ? AND household_id = ?').bind(id, H.hh),
   ]);
   return json({ ok: true });
